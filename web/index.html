@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MOMO Backtester</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">MOMO <span>EMA · Supertrend · MACD hook · ADX sessions</span></div>
+  <div class="hdr-right">
+    <span id="srcBadge" class="badge"></span>
+    <button id="btnConn" class="ghost">Data connections</button>
+    <label class="chk"><input type="checkbox" id="refresh"> re-download data</label>
+    <button id="btnRun" class="primary">Run backtest</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside id="sidebar">
+    <div class="group" id="periodGroup">
+      <h3>Backtest periods</h3>
+      <div class="row2">
+        <label>In-sample start<input type="date" id="isStart"></label>
+        <label>In-sample end<input type="date" id="isEnd"></label>
+      </div>
+      <label class="chk"><input type="checkbox" id="oosOn" checked> Out-of-sample period</label>
+      <div class="row2" id="oosRow">
+        <label>OOS start<input type="date" id="oosStart"></label>
+        <label>OOS end<input type="date" id="oosEnd"></label>
+      </div>
+      <div class="quick">
+        <button class="mini" data-q="tvmax">TradingView max (split 60/40)</button>
+        <button class="mini" data-q="12m">Last 12 months</button>
+        <button class="mini" data-q="24m">Last 24 months</button>
+      </div>
+      <div class="hint" id="covHint"></div>
+    </div>
+    <div id="paramGroups"></div>
+    <div class="group">
+      <h3>Presets</h3>
+      <div class="row2">
+        <select id="presetSel"><option value="">— saved presets —</option></select>
+        <button class="mini" id="presetLoad">Load</button>
+      </div>
+      <div class="row2">
+        <input id="presetName" placeholder="preset name">
+        <button class="mini" id="presetSave">Save</button>
+      </div>
+      <button class="mini wide" id="resetDefaults">Reset all to defaults</button>
+    </div>
+  </aside>
+
+  <main>
+    <nav class="tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="trades">Trades</button>
+      <button data-tab="chart">Chart inspector</button>
+      <button data-tab="breakdown">Breakdown</button>
+      <button data-tab="rejections">Setups & rejections</button>
+      <button data-tab="rules">Rules & notes</button>
+    </nav>
+
+    <section id="tab-overview" class="tab active">
+      <div class="card bebar">
+        <b>Break-even</b>
+        <label class="chk"><input type="checkbox" id="beOn"> move SL to entry</label>
+        <label class="inl">when price has covered <input type="number" id="bePct" min="1" max="100" step="5"> % of the way to TP</label>
+        <label class="inl">offset <input type="number" id="beOff" step="0.1"> pips</label>
+        <button class="mini primary" id="beRun">Apply &amp; re-run</button>
+      </div>
+      <div id="warnings"></div>
+      <div id="emptyState" class="empty">Set the periods and parameters on the left, then press <b>Run backtest</b>.</div>
+      <div id="overviewBody" hidden>
+        <div class="kpis" id="kpis"></div>
+        <div class="card">
+          <div class="card-h">Equity (mark-to-market on every 5m close) <span class="legend" id="eqLegend"></span></div>
+          <div id="eqChart" class="chart-lg"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">Drawdown %</div>
+          <div id="ddChart" class="chart-sm"></div>
+        </div>
+        <div class="card">
+          <div class="card-h">All metrics</div>
+          <div id="metricsTable"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-trades" class="tab">
+      <div class="toolbar">
+        <select id="trRun"></select>
+        <select id="trPair"><option value="">All pairs</option></select>
+        <select id="trDir"><option value="">Both directions</option><option>BUY</option><option>SELL</option></select>
+        <select id="trExit"><option value="">All exits</option></select>
+        <button class="mini" id="csvBtn">Export CSV</button>
+        <span class="hint">Click a trade to see its full audit and chart.</span>
+      </div>
+      <div class="split">
+        <div class="tablewrap" id="tradesWrap"></div>
+        <div class="detail" id="tradeDetail"><div class="hint">No trade selected.</div></div>
+      </div>
+    </section>
+
+    <section id="tab-chart" class="tab">
+      <div class="toolbar">
+        <select id="chPair"></select>
+        <input type="datetime-local" id="chCenter">
+        <button class="mini" id="chLoad">Load</button>
+        <span class="sep"></span>
+        <label class="chk"><input type="checkbox" class="mk" value="trade" checked> trades</label>
+        <label class="chk"><input type="checkbox" class="mk" value="hook" checked> MACD hooks</label>
+        <label class="chk"><input type="checkbox" class="mk" value="bos" checked> EMA BOS</label>
+        <label class="chk"><input type="checkbox" class="mk" value="st" checked> ST flips</label>
+        <label class="chk"><input type="checkbox" class="mk" value="ind1"> Indicator-1 signals</label>
+        <label class="chk"><input type="checkbox" class="mk" value="ind2"> Indicator-2 signals</label>
+      </div>
+      <div class="hint" id="chInfo">Times are <span class="tzname">BGN</span>. Grey background = news blackout window, green tint = ADX-confirmed session.</div>
+      <div class="pxwrap"><div id="pxChart" class="chart-px"></div><div id="pxLegend" class="legend-ov"></div></div>
+      <div id="macdChart" class="chart-macd"></div>
+      <div class="hint">Histogram colours exactly as TradingView paints them. A small dot above a bar = its value displays as 0 and was re-interpreted (dot colour = colour used by the strategy).</div>
+      <div class="card"><div class="card-h">Relevant news in view (<span class="tzname">BGN</span>)</div><div id="chNews" class="hint"></div></div>
+    </section>
+
+    <section id="tab-breakdown" class="tab">
+      <div class="toolbar"><select id="bdRun"></select></div>
+      <div class="grid2">
+        <div class="card"><div class="card-h">By pair</div><div id="bdPair"></div></div>
+        <div class="card"><div class="card-h">By session</div><div id="bdSession"></div><div class="card-h">By direction</div><div id="bdDir"></div></div>
+        <div class="card"><div class="card-h">By exit reason</div><div id="bdExit"></div></div>
+        <div class="card"><div class="card-h">By entry hour (<span class="tzname">BGN</span>)</div><div id="bdHour"></div></div>
+        <div class="card"><div class="card-h">Monthly</div><div id="bdMonthly"></div></div>
+        <div class="card"><div class="card-h">R-multiple distribution</div><canvas id="rHist" height="220"></canvas></div>
+      </div>
+    </section>
+
+    <section id="tab-rejections" class="tab">
+      <div class="toolbar">
+        <select id="rjRun"></select>
+        <select id="rjReason"><option value="">All reasons</option></select>
+        <select id="rjPair"><option value="">All pairs</option></select>
+      </div>
+      <div class="grid2">
+        <div class="card"><div class="card-h">Setup funnel</div><div id="funnel"></div></div>
+        <div class="card"><div class="card-h">Raw events per pair (test period)</div><div id="evStats"></div></div>
+      </div>
+      <div class="card"><div class="card-h">ADX session checks (1H, completed candle at each check) <span class="hint">compare with the table of your MACD+ADX indicator</span></div>
+        <div class="tablewrap tall" id="adxWrap"></div></div>
+      <div class="card"><div class="card-h">Rejected setups (all three indicators lined up, but a filter failed)</div>
+        <div class="tablewrap tall" id="rjWrap"></div></div>
+    </section>
+
+    <section id="tab-rules" class="tab">
+      <div id="rulesBody" class="prose"></div>
+    </section>
+  </main>
+</div>
+
+<dialog id="connDlg">
+  <form method="dialog" class="dlg">
+    <h3>Data connections</h3>
+    <p class="hint"><b>TradingView</b> (default) needs nothing. Anonymous history: ~1 week of 1m, ~4 weeks of 5m, ~1.5 years of 1H.
+      A TradingView <code>sessionid</code> cookie of your account raises the bar limits (plan dependent) and enables the
+      “verify indicators” check.</p>
+    <label>TradingView sessionid<input id="tvSid" type="password" autocomplete="off" placeholder="leave empty to keep"></label>
+    <label>TradingView sessionid_sign (optional)<input id="tvSidSign" type="password" autocomplete="off" placeholder="leave empty to keep"></label>
+    <p class="hint"><b>OANDA v20</b> is the price feed behind TradingView's OANDA symbols. With a free practice-account API token you get
+      years of 1m bid/ask history and 5-second candles for the exact 30-second entry and SL/TP resolution.</p>
+    <label>OANDA API token<input id="oaTok" type="password" autocomplete="off" placeholder="leave empty to keep"></label>
+    <label>OANDA environment<select id="oaEnv"><option value="practice">practice</option><option value="live">live</option></select></label>
+    <p class="hint">Saved only to the local <code>.env</code> file in this project (permissions 600).</p>
+    <div id="connStatus" class="hint"></div>
+    <h3>TradingView history download</h3>
+    <p class="hint">Pages backwards through TradingView history (like scrolling the chart left) until the date below or until your
+      plan's limit, and keeps everything in <code>data_cache/</code>. Takes several minutes for 1m data.</p>
+    <div class="row2">
+      <label>Back to<input type="date" id="dlSince" value="2025-01-01"></label>
+      <label>Timeframes<select id="dlTfs"><option value="5,60">5m + 1H</option><option value="5,1,60" selected>5m + 1m + 1H</option></select></label>
+    </div>
+    <div class="dlg-btns" style="justify-content:flex-start">
+      <button type="button" class="ghost" id="entBtn">Check what my session can see</button>
+      <button type="button" class="primary" id="dlBtn">Download history</button>
+      <button type="button" class="ghost" id="dlCancel">Cancel</button>
+    </div>
+    <div id="dlStatus" class="hint"></div>
+    <div class="dlg-btns">
+      <button type="button" class="ghost" id="verifyBtn">Verify indicators vs TradingView</button>
+      <button type="button" class="primary" id="connSave">Save & test</button>
+      <button value="close" class="ghost">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="busy" hidden><div class="spinner"></div><div id="busyMsg">Running…</div></div>
+<script src="/static/app.js"></script>
+</body>
+</html>
