@@ -58,6 +58,7 @@ const GROUPS = [
     { key: "bos_mode", label: "BOS definition", type: "select", options: [["cross_candle", "Only the candle that closes across the EMA; its body must clear EMA by the buffer"], ["indicator", "Close crosses EMA±buffer, may be a later candle (indicator 1)"]] },
     { key: "bos_after_st_max", label: "BOS up to N bars AFTER ST flip", type: "number", step: 1, half: true },
     { key: "bos_before_st_max", label: "BOS up to N bars BEFORE ST flip", type: "number", step: 1, half: true, help: "Your rule: same or next candle → after=1, before=0. Indicator 1 uses before=2, after=0." },
+    { key: "exit_on_entry_ema_cross", label: "Exit immediately if entry candle closes back across EMA", type: "check" },
   ]},
   { title: "MACD hook (5m)", fields: [
     { key: "macd_fast", label: "Fast", type: "number", step: 1, third: true },
@@ -807,6 +808,7 @@ function renderRules() {
 <li><b>SL</b> = ${P.sl_mode === "avg_close" ? "the middle (average) of the Supertrend value of the signal candle and of the entry candle, as drawn on the chart — if the line is flat, the SL is on the line. The entry candle's value is only final when it closes, so during the entry candle the SL sits on the signal candle's Supertrend, then moves to the average" : P.sl_mode === "avg_live" ? "average of the Supertrend value of the signal candle and the live Supertrend value of the entry candle at the moment of entry" : "Supertrend value of the signal candle"}. <b>TP</b> = entry ± ${P.rr} × the distance from entry to that SL.</li>
 <li>Longs are stopped/targeted on the bid, shorts on the ask. A gap through a level fills at the gap price.</li>
 <li>${P.be_enabled ? `<b>Break-even</b>: once price has covered ${P.be_trigger_pct}% of the distance from entry to TP, the SL moves to entry${P.be_offset_pips ? ` ${P.be_offset_pips > 0 ? "+" : ""}${P.be_offset_pips} pips` : ""}. It applies from the next bar (5s / 1m / 5m), because inside one bar the order of high and low is unknown. With commission, a break-even exit is a small loss.` : "Break-even off."}</li>
+<li>${P.exit_on_entry_ema_cross ? "<b>EMA reversal exit</b>: If the trade enters and the <b>entry candle closes back across the EMA</b> (close ≤ EMA for buys, ≥ EMA for sells), the trade exits immediately on that candle's close." : "EMA reversal exit off."}</li>
 <li>${P.close_before_news_min > 0 ? `Open trades are closed at market <b>${P.close_before_news_min} min before</b> any relevant news.` : "No pre-news close."} ${P.close_at_session_end ? "Trades are closed at session end." : ""} ${P.close_before_weekend ? `Trades are closed Friday ${P.weekend_close_hour}:00.` : ""}</li>
 </ul>
 <h3>5. News</h3>

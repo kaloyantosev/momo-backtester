@@ -50,6 +50,7 @@ DEFAULTS: dict = {
     "bos_mode": "cross_candle",       # cross_candle: only the candle whose close crosses the EMA, body >= buffer | indicator
     "bos_after_st_max": 1,            # BOS may come 0..N bars AFTER the ST flip
     "bos_before_st_max": 0,           # BOS may come 0..N bars BEFORE the ST flip (indicator 1 uses 2)
+    "exit_on_entry_ema_cross": True,  # exit immediately if entry candle closes back across EMA
     # ---- MACD
     "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
     "hook_min": 2, "hook_max": 5,
@@ -612,6 +613,8 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
         exc(ohlc[1], ohlc[2])
         return max(tb, T), res[0], res[1], ex["worst"], ex["best"], tiers
     last = pp.bid5[-1, 3] if side == 0 else (pp.ask5[-1, 3] if pp.ask5 is not None else pp.bid5[-1, 3] + pp.spread)
+    if deadline is not None and int(pp.t5[-1]) + 300 >= deadline:
+        return deadline, last, deadline_reason, ex["worst"], ex["best"], tiers
     return int(pp.t5[-1]) + 300, last, "end_of_data", ex["worst"], ex["best"], tiers
 
 

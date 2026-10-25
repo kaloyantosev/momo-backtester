@@ -283,6 +283,12 @@ def run_backtest(pdatas: dict[str, PairData], events: pd.DataFrame, P: dict, sta
             we = _weekend_deadline(T, P)
             if we and (deadline is None or we < deadline):
                 deadline, why = we, "weekend_close"
+        if P.get("exit_on_entry_ema_cross", True):
+            ema_crossed = (pp.c[k] <= pp.ema[k]) if d == 1 else (pp.c[k] >= pp.ema[k])
+            if ema_crossed:
+                close_entry_bar = int(pp.t5[k]) + 300
+                if close_entry_bar > T and (deadline is None or close_entry_bar <= deadline):
+                    deadline, why, why_detail = close_entry_bar, "ema_exit", "entry candle closed across EMA"
         be = ({"pct": float(P["be_trigger_pct"]), "off": float(P["be_offset_pips"]) * pp.pip}
               if P["be_enabled"] and 0 < float(P["be_trigger_pct"]) <= 100 else None)
         ext, exp, reason, mae, mfe, tiers = simulate_exit(pa, d, k, T, entry, sl, tp, deadline, why,
@@ -327,7 +333,7 @@ def run_backtest(pdatas: dict[str, PairData], events: pd.DataFrame, P: dict, sta
             "hist_signal": float(pp.hist[C]), "hist_entry_30s": float(histE),
             "bos_pierce_pips": round(bb[1], 2), "bos_range_pips": round(bb[2], 2),
             "exit_time": _iso(ext), "exit": round(float(exp), 6), "exit_reason": reason,
-            "exit_note": why_detail if reason == "news_close" else "",
+            "exit_note": why_detail if reason in ("news_close", "ema_exit") else "",
             "pnl": round(pnl, 2), "r": round(pnl / risk_usd, 3) if risk_usd > 0 else 0.0,
             "risk_usd": round(risk_usd, 2), "spread_cost": round(spread_cost, 2),
             "pips": round(sgn * (exp - entry) / pp.pip, 1),

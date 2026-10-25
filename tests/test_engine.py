@@ -298,3 +298,18 @@ def test_break_even():
     pp.bid5[9, 2] = 1.0997
     t, px, why, *_ = simulate_exit(pa, 1, 5, T, E, SL, TP, None, "", "pessimistic", int(pp.t5[6]), 1.0993, 1.1006, be)
     assert why == "be" and px == E and t == pp.t5[9]
+
+
+def test_entry_candle_ema_cross_exit():
+    c = np.full(20, 1.1000)
+    pp, P = make_pp(c, h=c + 0.0002, l=c - 0.0002)
+    pa = PriceAccess(pp, P)
+    k = 5
+    T = int(pp.t5[k]) + 30
+    E, SL, TP = 1.1002, 1.0980, 1.1040
+    pp.c[k] = 1.0995
+    pp.bid5[k, 3] = 1.0995
+    t_close = int(pp.t5[k]) + 300
+    t, px, why, *_ = simulate_exit(pa, 1, k, T, E, SL, TP, t_close, "ema_exit", "pessimistic")
+    assert why == "ema_exit"
+    assert t == t_close

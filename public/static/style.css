@@ -91,7 +91,7 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .spinner { width: 38px; height: 38px; border: 3px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .tag { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11px; background: var(--panel2); border: 1px solid var(--line); }
-.tag.tp { color: var(--good); } .tag.sl { color: var(--bad); }
+.tag.tp { color: var(--good); } .tag.sl { color: var(--bad); } .tag.ema_exit { color: var(--warn); }
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; height: auto; }
   aside { border-right: none; border-bottom: 1px solid var(--line); }
