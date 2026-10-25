@@ -22,7 +22,7 @@ const GROUPS = [
     { key: "max_open_total", label: "Max open positions across pairs", type: "number", step: 1, help: "One position per pair is always enforced." },
   ]},
   { title: "Costs", fields: [
-    { key: "spread_pips", label: "Fixed spread in pips (TradingView data has no ask; OANDA uses the real bid/ask)", type: "spreads" },
+    { key: "spread_pips", label: "Fixed spread in pips (0 = zero spread)", type: "spreads" },
     { key: "commission_per_lot", label: "Commission USD per lot, round turn", type: "number", step: 0.5 },
   ]},
   { title: "Sessions & ADX (1H)", fields: [
@@ -307,7 +307,7 @@ function renderWarnings() {
     }
   });
   if (state.data.params.intrabar_tie === "optimistic") w.add("Intrabar ties resolved optimistically (TP first) — results are biased upward.");
-  if (state.data.params.source === "tradingview") w.add("TradingView data has no ask price: a fixed spread per pair is added (Costs). OANDA source uses the real bid/ask.");
+  if (state.data.params.source === "tradingview" && Object.values(state.data.params.spread_pips || {}).some(v => v > 0)) w.add("TradingView data has no ask price: a fixed spread per pair is added (Costs). OANDA source uses the real bid/ask.");
   $("#warnings").innerHTML = w.size ? `<div class="warn"><b>Read before trusting the numbers</b><ul>${[...w].map(x => `<li>${esc(x)}</li>`).join("")}</ul></div>` : "";
 }
 
@@ -891,6 +891,8 @@ async function init() {
   LS.set("momo.v4", true);
   if (saved && !LS.get("momo.v5", false)) { ["tz", "s1_check_hour", "s1_end_hour", "s2_check_hour", "s2_end_hour", "weekend_close_hour"].forEach(k => delete saved[k]); LS.set("momo.params", saved); }
   LS.set("momo.v5", true);
+  if (saved && !LS.get("momo.v6", false)) { delete saved.spread_pips; LS.set("momo.params", saved); }
+  LS.set("momo.v6", true);
   if (saved) Object.entries(saved).forEach(([k, v]) => { if (k in state.params) state.params[k] = (typeof v === "object" && !Array.isArray(v) && v) ? { ...state.params[k], ...v } : v; });
   setTZ(state.params.tz);
   buildParams(); updateBadge(); syncBe(); setDateBounds();

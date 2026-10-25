@@ -25,7 +25,7 @@ DEFAULTS: dict = {
     "lots": 0.2,
     "max_open_total": 6,              # one position per pair is always enforced
     # ---- costs
-    "spread_pips": {"EURJPY": 1.8, "EURUSD": 1.0, "AUDUSD": 1.2, "GBPUSD": 1.4, "USDJPY": 1.2, "USDCHF": 1.6},
+    "spread_pips": {"EURJPY": 0.0, "EURUSD": 0.0, "AUDUSD": 0.0, "GBPUSD": 0.0, "USDJPY": 0.0, "USDCHF": 0.0},
     "commission_per_lot": 0.0,        # USD per 1.0 lot round turn
     # ---- sessions / ADX (hours in `tz`)
     "tz": "Europe/Sofia",             # Bulgarian time (always London + 2h; both switch DST on the same dates)
@@ -182,7 +182,7 @@ def prepare(pd_: PairData, P: dict) -> Prepared:
         ask1 = pd_.m1[["ao", "ah", "al", "ac"]].to_numpy(float) if has_ask and "ao" in pd_.m1.columns else None
     return Prepared(
         pair=pd_.pair, pip=pip_size(pd_.pair), tick=tick_size(pd_.pair), has_ask=has_ask,
-        spread=float(P["spread_pips"].get(pd_.pair, 1.0)) * pip_size(pd_.pair),
+        spread=float(P.get("spread_pips", {}).get(pd_.pair, 0.0)) * pip_size(pd_.pair),
         t5=(m5.index.asi8 // 10**9).astype(np.int64), o=o, h=h, l=l, c=c,
         bid5=m5[["bo", "bh", "bl", "bc"]].to_numpy(float),
         ask5=m5[["ao", "ah", "al", "ac"]].to_numpy(float) if has_ask else None,
