@@ -106,3 +106,125 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 label.inl { flex-direction: row; align-items: center; gap: 6px; color: var(--text); }
 label.inl input { width: 70px; }
 td.g { color: var(--good); } td.r { color: var(--bad); }
+
+/* --- Visual Trade Cards in Trades tab --- */
+.trade-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 24px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+@media (max-width: 960px) {
+  .trade-card {
+    grid-template-columns: 1fr;
+  }
+}
+.tc-chart-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.tc-px {
+  height: 380px;
+  border: 1px solid var(--line);
+  border-radius: 6px 6px 0 0;
+  position: relative;
+  background: #161a21;
+}
+.tc-macd {
+  height: 140px;
+  border: 1px solid var(--line);
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  background: #161a21;
+}
+.tc-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 13px;
+}
+.tc-details-col {
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 10px;
+  margin-bottom: 4px;
+}
+.tc-pair {
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  letter-spacing: 0.5px;
+}
+.tc-dir {
+  font-size: 12px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.tc-dir.BUY {
+  background: rgba(38, 166, 154, 0.18);
+  color: #26a69a;
+  border: 1px solid #26a69a;
+}
+.tc-dir.SELL {
+  background: rgba(239, 83, 80, 0.18);
+  color: #ef5350;
+  border: 1px solid #ef5350;
+}
+.tc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 8px;
+}
+.tc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tc-item.full {
+  grid-column: span 2;
+}
+.tc-item label {
+  font-size: 11px;
+  text-transform: uppercase;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+  margin: 0;
+}
+.tc-item span {
+  font-size: 13px;
+  font-family: var(--mono);
+  color: var(--text);
+  font-weight: 500;
+}
+.tc-item.highlight {
+  background: rgba(255, 255, 255, 0.03);
+  padding: 6px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.tc-item.highlight span {
+  font-size: 16px;
+  font-weight: 700;
+}
+

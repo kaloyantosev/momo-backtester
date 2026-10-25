@@ -98,12 +98,9 @@
         <select id="trDir"><option value="">Both directions</option><option>BUY</option><option>SELL</option></select>
         <select id="trExit"><option value="">All exits</option></select>
         <button class="mini" id="csvBtn">Export CSV</button>
-        <span class="hint">Click a trade to see its full audit and chart.</span>
+        <span id="tradesSummary" class="hint"></span>
       </div>
-      <div class="split">
-        <div class="tablewrap" id="tradesWrap"></div>
-        <div class="detail" id="tradeDetail"><div class="hint">No trade selected.</div></div>
-      </div>
+      <div id="tradesWrap"></div>
     </section>
 
     <section id="tab-chart" class="tab">

@@ -255,7 +255,7 @@ def _chart_window(ctx: dict, pair: str, center_iso: str, before: int, after: int
     ci = int(np.searchsorted(pp.t5, center))
     lo, hi = max(ci - before, 0), min(ci + after, len(pp.t5))
     if hi <= lo:
-        raise HTTPException(404, "no bars around this time")
+        return {"error": "no bars around this time"}
     sl = slice(lo, hi)
     t = pp.t5[sl]
     tl = _local_epochs(t, P["tz"])

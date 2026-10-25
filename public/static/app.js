@@ -202,12 +202,25 @@ function setPeriods(a, b, split) {
 function quickPeriod(q) {
   const today = new Date();
   if (q === "tvmax") {
-    const cov = state.cfg.coverage || {};
+    const cov = (state.cfg && state.cfg.coverage) || {};
     let first = null, last = null;
-    Object.values(cov).forEach(c => { if (c.tv_5) { const f = new Date(c.tv_5[0]), l = new Date(c.tv_5[1]); if (!first || f > first) first = f; if (!last || l < last) last = l; } });
-    if (!first) { first = new Date(today.getTime() - 26 * 86400000); last = today; }
-    first = new Date(first.getTime() + 2 * 86400000); // indicator warm-up inside the downloaded window
-    setPeriods(first, last, 0.6);
+    Object.values(cov).forEach(c => {
+      if (c.tv_5) {
+        const f = new Date(c.tv_5[0]), l = new Date(c.tv_5[1]);
+        if (!first || f > first) first = f;
+        if (!last || l < last) last = l;
+      }
+    });
+    if (!first) {
+      first = new Date(today.getTime() - 26 * 86400000);
+      last = today;
+    }
+    const warmStart = new Date(first.getTime() + 2 * 86400000);
+    $("#isStart").value = isoDate(warmStart);
+    $("#isEnd").value = isoDate(last);
+    $("#oosOn").checked = false;
+    $("#oosRow").style.display = "none";
+    periodsFromUI();
   } else {
     const months = q === "12m" ? 12 : 24;
     const a = new Date(today); a.setMonth(a.getMonth() - months);
@@ -398,61 +411,159 @@ function fillRunSelects() {
   $("#trExit").innerHTML = `<option value="">All exits</option>` + [...exits].map(x => `<option>${x}</option>`).join("");
 }
 
-// ------------------------------------------------------------------ trades
-const TRADE_COLS = [
-  ["#", "id"], ["Period", "_run"], ["Pair", "pair"], ["Dir", "dir"], ["Sess", "session"], ["ADX", "adx", v => num(v)],
-  ["Entry", "entry_time", v => fmtT(v, true)], ["Entry", "entry"], ["SL", "sl"], ["TP", "tp"], ["SL pips", "sl_pips", v => num(v, 1)],
-  ["Exit time", "exit_time", v => fmtT(v)], ["Exit", "exit"], ["Reason", "exit_reason", v => `<span class="tag ${v}">${v}</span>`],
-  ["Pips", "pips", v => `<span class="${cls(v)}">${num(v, 1)}</span>`], ["P&L", "pnl", v => `<span class="${cls(v)}">${money(v)}</span>`],
-  ["R", "r", v => `<span class="${cls(v)}">${num(v, 2)}</span>`], ["MAE", "mae_pips", v => num(v, 1)], ["MFE", "mfe_pips", v => num(v, 1)],
-  ["Min", "duration_min", v => num(v, 0)], ["30s check", "entry_check", (v, t) => chk(t)], ["Data", "precision"],
-];
+// ------------------------------------------------------------------ trades (visual charts + key metrics)
+const TRADES_PAGE = 10;
+state.tradeCharts = [];
+
 function tradeRows() {
   const sel = $("#trRun").value;
   let rows = [];
   runs().forEach((r, i) => { if (sel === "all" || String(i) === sel) r.result.trades.forEach(t => rows.push({ ...t, _run: r.name, _ri: i })); });
   const p = $("#trPair").value, d = $("#trDir").value, x = $("#trExit").value;
   rows = rows.filter(t => (!p || t.pair === p) && (!d || t.dir === d) && (!x || t.exit_reason === x));
-  const s = state.sort.trades;
-  if (s) rows.sort((a, b) => (a[s.k] > b[s.k] ? 1 : a[s.k] < b[s.k] ? -1 : 0) * s.dir);
+  rows.sort((a, b) => a.entry_ts - b.entry_ts);
   return rows;
 }
+
+function disposeTradeCharts() {
+  (state.tradeCharts || []).forEach(c => { try { c.remove(); } catch {} });
+  state.tradeCharts = [];
+  if (state.tcObserver) {
+    state.tcObserver.disconnect();
+    state.tcObserver = null;
+  }
+}
+
+function tradeCardHtml(t, idx) {
+  return `
+  <div class="trade-card" id="tc-${idx}" data-idx="${idx}">
+    <div class="tc-chart-col">
+      <div class="pxwrap">
+        <div class="tc-px"><div class="tc-loading">Loading chart…</div></div>
+        <div class="legend-ov"></div>
+      </div>
+      <div class="tc-macd"></div>
+    </div>
+    <div class="tc-details-col">
+      <div class="tc-header">
+        <span class="tc-pair">${t.pair}</span>
+        <span class="tc-dir ${t.dir}">${t.dir}</span>
+      </div>
+      <div class="tc-grid">
+        <div class="tc-item full">
+          <label>Entry time</label>
+          <span>${fmtT(t.entry_time, true)}</span>
+        </div>
+        <div class="tc-item full">
+          <label>Exit time</label>
+          <span>${fmtT(t.exit_time, true)}</span>
+        </div>
+        <div class="tc-item">
+          <label>Entry price</label>
+          <span>${t.entry}</span>
+        </div>
+        <div class="tc-item">
+          <label>SL pips</label>
+          <span>${num(t.sl_pips, 1)} p</span>
+        </div>
+        <div class="tc-item">
+          <label>Stop Loss (SL)</label>
+          <span>${t.sl}</span>
+        </div>
+        <div class="tc-item">
+          <label>Take Profit (TP)</label>
+          <span>${t.tp}</span>
+        </div>
+        <div class="tc-item full">
+          <label>Reason</label>
+          <span><span class="tag ${t.exit_reason}">${t.exit_reason.toUpperCase()}</span></span>
+        </div>
+        <div class="tc-item highlight">
+          <label>Pips</label>
+          <span class="${cls(t.pips)}">${t.pips > 0 ? "+" : ""}${num(t.pips, 1)}</span>
+        </div>
+        <div class="tc-item highlight">
+          <label>P&L</label>
+          <span class="${cls(t.pnl)}">${money(t.pnl)}</span>
+        </div>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderTrades() {
+  disposeTradeCharts();
   const rows = tradeRows();
-  const head = TRADE_COLS.map(([l, k]) => `<th data-k="${k}">${l}</th>`).join("");
-  const body = rows.map((t, idx) => `<tr data-idx="${idx}">${TRADE_COLS.map(([, k, f]) => `<td>${f ? f(t[k], t) : esc(t[k])}</td>`).join("")}</tr>`).join("");
-  const tot = rows.reduce((a, t) => a + t.pnl, 0);
-  $("#tradesWrap").innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody><tfoot><tr><td colspan="15">${rows.length} trades</td><td class="${cls(tot)}">${money(tot)}</td><td colspan="6"></td></tr></tfoot></table>`;
-  $$("#tradesWrap th").forEach(th => th.onclick = () => { const k = th.dataset.k; const cur = state.sort.trades; state.sort.trades = { k, dir: cur && cur.k === k ? -cur.dir : 1 }; renderTrades(); });
-  $$("#tradesWrap tbody tr").forEach(tr => tr.onclick = () => { $$("#tradesWrap tr.sel").forEach(x => x.classList.remove("sel")); tr.classList.add("sel"); showTrade(rows[+tr.dataset.idx]); });
   state.tradeRowsCache = rows;
+  state.tcShown = 0;
+  const tot = rows.reduce((a, t) => a + t.pnl, 0);
+  $("#tradesSummary").innerHTML = `${rows.length} trades · Total P&L: <span class="${cls(tot)}">${money(tot)}</span>`;
+  $("#tradesWrap").innerHTML = rows.length ? "" : `<div class="hint">No trades match the selected filters.</div>`;
+  if (!rows.length) return;
+
+  state.tcObserver = new IntersectionObserver(entries => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return;
+      state.tcObserver.unobserve(e.target);
+      loadSingleTradeChart(e.target);
+    });
+  }, { rootMargin: "400px 0px" });
+
+  moreTrades();
 }
-function showTrade(t) {
-  state.sel = t;
-  const dl = (pairs) => `<dl>${pairs.map(([a, b]) => `<dt>${a}</dt><dd>${b}</dd>`).join("")}</dl>`;
-  const h = v => v == null ? "–" : Number(v).toExponential(3);
-  $("#tradeDetail").innerHTML = `
-    <div class="card-h">#${t.id} ${t.pair} ${t.dir} <span class="${cls(t.pnl)}">${money(t.pnl)} (${num(t.r, 2)}R)</span></div>
-    <button class="mini" id="openChart">Open in chart inspector</button>
-    <h4>Setup bars (${tzName()}, bar open)</h4>
-    ${dl([["Supertrend flip", fmtT(t.st_bar)], ["EMA BOS", fmtT(t.bos_bar)], ["MACD hook (flip bar)", fmtT(t.hook_bar)], ["Signal (confluence) bar", fmtT(t.signal_bar)], ["Entry", fmtT(t.entry_time, true)]])}
-    <h4>EMA / Supertrend</h4>
-    ${dl([["BOS: EMA line → body edge", num(t.bos_pierce_pips) + " pips"], ["BOS candle range", num(t.bos_range_pips) + " pips"], ["ST signal candle", t.st_signal], ["ST entry candle (closed)", t.st_entry_final], ["ST entry candle (live @+30s)", t.st_entry_live]])}
-    <h4>MACD histogram</h4>
-    ${dl([["Receding bars before flip", t.hook_bars], ["Zero rule applied near flip", t.hook_zero_adjusted ? "yes" : "no"], ["Hist bar before hook", h(t.hist_before_hook)], ["Hist hook bar", h(t.hist_hook)], ["Hist next bar @+30s", h(t.hist_next_30s)], ["Hist signal bar", h(t.hist_signal)], ["Hist entry bar @+30s (estimate)", h(t.hist_entry_30s)], ["Hist entry bar at its close", h(t.hist_entry_close)]])}
-    <h4>+30s MACD checks</h4>
-    ${dl([["2-bar rule", `${t.hook_check}${t.hook_crit != null ? ` (price had to be ${t.dir === "BUY" ? "above" : "below"} ${t.hook_crit})` : ""}`],
-          ["Entry bar stronger", `${t.entry_check}${t.entry_crit != null ? ` (price had to be ${t.dir === "BUY" ? "above" : "below"} ${t.entry_crit})` : ""}`],
-          ["Faded later in entry candle", t.faded_after_entry ? "yes (after the 30s check)" : "no"]])}
-    <h4>Session</h4>
-    ${dl([["Session", t.session], ["ADX at check", num(t.adx)]])}
-    <h4>Order</h4>
-    ${dl([["Entry price", t.entry], ["Spread at entry", num(t.spread_pips, 1) + " pips"], ["SL rule", esc(t.sl_rule)], ["Signal / previous candle range", `${num(t.range_signal_pips, 1)} / ${num(t.range_prev_pips, 1)} pips`], ["SL during entry candle", t.sl_initial], ["TP during entry candle", t.tp_initial], ["SL moved at", t.sl_moved_at ? fmtT(t.sl_moved_at) : "–"], ["Stop loss", `${t.sl} (${num(t.sl_pips, 1)} pips)`], ["Take profit", `${t.tp} (${num(t.tp_pips, 1)} pips)`], ["Risk (1R)", money(t.risk_usd)]])}
-    ${t.sl_note ? `<div class="hint">${esc(t.sl_note)}</div>` : ""}
-    <h4>Exit</h4>
-    ${dl([["Exit", `${fmtT(t.exit_time, true)}`], ["Price", t.exit], ["Reason", t.exit_reason + (t.exit_note ? ` (${esc(t.exit_note)})` : "")], ["Pips", num(t.pips, 1)], ["MAE / MFE", `${num(t.mae_pips, 1)} / ${num(t.mfe_pips, 1)} pips`], ["Duration", num(t.duration_min, 1) + " min"], ["Data used", t.precision]])}`;
-  $("#openChart").onclick = () => openChart(t.pair, t.entry_time, t);
+
+function moreTrades() {
+  const rows = state.tradeRowsCache || [];
+  const from = state.tcShown, to = Math.min(rows.length, from + TRADES_PAGE);
+  const oldBtn = $("#tradesMore");
+  if (oldBtn) oldBtn.remove();
+
+  for (let i = from; i < to; i++) {
+    const t = rows[i];
+    const div = document.createElement("div");
+    div.innerHTML = tradeCardHtml(t, i);
+    const card = div.firstElementChild;
+    $("#tradesWrap").appendChild(card);
+    if (state.tcObserver) state.tcObserver.observe(card);
+  }
+  state.tcShown = to;
+
+  if (to < rows.length) {
+    const btn = document.createElement("button");
+    btn.id = "tradesMore";
+    btn.className = "mini";
+    btn.style.margin = "10px 0 20px";
+    btn.textContent = `Show more trades (${rows.length - to} left)`;
+    btn.onclick = moreTrades;
+    $("#tradesWrap").appendChild(btn);
+  }
 }
+
+async function loadSingleTradeChart(card) {
+  const idx = +card.dataset.idx;
+  const rows = state.tradeRowsCache || [];
+  const t = rows[idx];
+  if (!t || !card.isConnected) return;
+  const pxEl = $(".tc-px", card);
+  const mcEl = $(".tc-macd", card);
+  const legendEl = $(".legend-ov", card);
+
+  const durBars = Math.ceil((t.duration_min || 15) / 5);
+  const after = Math.min(180, Math.max(35, durBars + 25));
+  const before = 45;
+  const [s, e] = periodBounds();
+  const P = state.data ? state.data.params : state.params;
+
+  try {
+    const c = await api("/api/chart", { params: P, pair: t.pair, center: t.entry_time, start: s, end: e, before, after });
+    pxEl.innerHTML = "";
+    const res = plotChart(c, t.pair, t, { px: pxEl, macd: mcEl, legend: legendEl }, { show: new Set(["trade", "hook", "bos", "st"]), onlyTrade: true, fit: true });
+    state.tradeCharts.push(res.px, res.mc);
+  } catch (err) {
+    pxEl.innerHTML = `<div class="tc-loading hint">Failed to load chart: ${esc(err.message)}</div>`;
+  }
+}
+
 function exportCsv() {
   const rows = state.tradeRowsCache || [];
   if (!rows.length) return;
@@ -469,6 +580,7 @@ function periodBounds() {
   if (!R.length) return [$("#isStart").value, $("#oosOn").checked ? $("#oosEnd").value : $("#isEnd").value];
   return [R.map(r => r.start).sort()[0], R.map(r => r.end).sort().slice(-1)[0]];
 }
+
 function openChart(pair, centerIso, trade) {
   showTab("chart");
   $("#chPair").value = pair;
@@ -477,10 +589,10 @@ function openChart(pair, centerIso, trade) {
   $("#chCenter").value = loc;
   loadChart(trade);
 }
+
 async function loadChart(trade) {
   const pair = $("#chPair").value;
   if (!pair || !$("#chCenter").value) return;
-  // the input is wall-clock in the display timezone; convert to UTC
   const [d, tm] = $("#chCenter").value.split("T");
   const guess = new Date(`${d}T${tm}:00Z`);
   const off = new Date(guess.toLocaleString("en-US", { timeZone: TZ })) - new Date(guess.toLocaleString("en-US", { timeZone: "UTC" }));
@@ -492,25 +604,37 @@ async function loadChart(trade) {
     drawChart(c, pair, trade || state.sel);
   } catch (err) { alert(err.message); } finally { busy(false); }
 }
+
 function drawChart(c, pair, trade) {
   ["px", "macd"].forEach(k => { if (state.charts[k]) { state.charts[k].remove(); state.charts[k] = null; } });
-  const px = baseChart($("#pxChart"), { rightPriceScale: { borderColor: "#2a303b", scaleMargins: { top: 0.06, bottom: 0.06 } } });
-  const mc = baseChart($("#macdChart"));
-  state.charts.px = px; state.charts.macd = mc;
+  const show = new Set($$(".mk").filter(x => x.checked).map(x => x.value));
+  const r = plotChart(c, pair, trade, { px: $("#pxChart"), macd: $("#macdChart"), legend: $("#pxLegend") }, { show });
+  state.charts.px = r.px; state.charts.macd = r.mc;
+  const newsWin = (state.data ? state.data.params : state.params);
+  $("#chInfo").textContent = `${pair} 5m · times ${tzName()} · grey = news blackout (${newsWin.news_before_min}/${newsWin.news_after_min} min) · green tint = ADX-confirmed session · H<n> = valid hook (n receding bars) · B = valid EMA BOS, B✗ = BOS candle too large (pips) · N = news (list below)`;
+  $("#chNews").innerHTML = c.news.length ? c.news.map(n => `${fmtT(n.t)} — ${esc(n.title)} ${n.imp > 0 ? "(high)" : "(medium)"}`).join("<br>") : "No relevant news in this window.";
+}
+
+function plotChart(c, pair, trade, el, opt = {}) {
+  const show = opt.show || new Set(["trade", "hook", "bos", "st"]);
+  const px = baseChart(el.px, { rightPriceScale: { borderColor: "#2a303b", scaleMargins: { top: 0.08, bottom: 0.08 } } });
+  const mc = baseChart(el.macd);
   const fmt = { type: "price", precision: c.digits, minMove: Math.pow(10, -c.digits) };
+
   const bg = px.addHistogramSeries({ priceScaleId: "bg", priceLineVisible: false, lastValueVisible: false });
   px.priceScale("bg").applyOptions({ scaleMargins: { top: 0, bottom: 0 }, visible: false });
   const newsWin = (state.data ? state.data.params : state.params);
-  const nb = newsWin.news_before_min * 60, na = newsWin.news_after_min * 60;
+  const nb = (newsWin.news_before_min || 10) * 60, na = (newsWin.news_after_min || 10) * 60;
   bg.setData(c.t.map((t, i) => {
-    const inNews = c.news.some(n => t + 300 > n.t - nb && t <= n.t + na);
-    return { time: t, value: 1, color: inNews ? "rgba(140,140,140,0.28)" : c.gate[i] ? "rgba(38,166,154,0.07)" : "rgba(0,0,0,0)" };
+    const inNews = (c.news || []).some(n => t + 300 > n.t - nb && t <= n.t + na);
+    return { time: t, value: 1, color: inNews ? "rgba(140,140,140,0.28)" : (c.gate && c.gate[i]) ? "rgba(38,166,154,0.07)" : "rgba(0,0,0,0)" };
   }));
+
   const candles = px.addCandlestickSeries({ upColor: "#26a69a", downColor: "#ef5350", wickUpColor: "#26a69a", wickDownColor: "#ef5350", borderVisible: false, priceFormat: fmt });
   candles.setData(c.t.map((t, i) => ({ time: t, open: c.o[i], high: c.h[i], low: c.l[i], close: c.c[i] })));
   px.addLineSeries({ color: "#2962ff", lineWidth: 2, priceLineVisible: false, lastValueVisible: false, priceFormat: fmt })
     .setData(c.t.map((t, i) => c.ema[i] == null ? { time: t } : { time: t, value: c.ema[i] }));
-  // Supertrend like TradingView's plot.style_linebr: thin green (up) / red (down), broken at every flip
+
   let run = null;
   const flush = () => { if (run && run.pts.length) px.addLineSeries({ color: run.up ? "#4caf50" : "#f23645", lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: fmt }).setData(run.pts); };
   c.t.forEach((t, i) => {
@@ -520,9 +644,9 @@ function drawChart(c, pair, trade) {
     run.pts.push({ time: t, value: c.st[i] });
   });
   flush();
-  const show = new Set($$(".mk").filter(x => x.checked).map(x => x.value));
+
   const marks = [];
-  c.marks.forEach(m => {
+  (c.marks || []).forEach(m => {
     const t = c.t[m.i];
     if (m.kind === "hook" && show.has("hook") && m.ok) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: "#ffeb3b", shape: "circle", text: `H${m.k}` });
     if (m.kind === "bos" && show.has("bos")) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: m.ok ? "#42a5f5" : "#5c6b80", shape: "square", text: m.ok ? `B${m.pierce.toFixed(1)}` : `B✗${m.pierce.toFixed(1)}` });
@@ -530,56 +654,69 @@ function drawChart(c, pair, trade) {
     if (m.kind === "ind1" && show.has("ind1")) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: "#ce93d8", shape: m.d > 0 ? "arrowUp" : "arrowDown", text: "I1" });
     if (m.kind === "ind2" && show.has("ind2")) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: "#80deea", shape: m.d > 0 ? "arrowUp" : "arrowDown", text: "I2" });
   });
-  c.news.forEach(n => {
+  (c.news || []).forEach(n => {
     const t = Math.floor(n.t / 300) * 300;
     if (t >= c.t[0] && t <= c.t[c.t.length - 1]) marks.push({ time: t, position: "aboveBar", color: "#b0b7c3", shape: "square", text: `N` });
   });
+
   if (show.has("trade")) {
-    runs().forEach(r => r.result.trades.filter(x => x.pair === pair).forEach(x => {
+    const list = opt.onlyTrade && trade ? [trade] : [].concat(...runs().map(r => r.result.trades.filter(x => x.pair === pair)));
+    list.forEach(x => {
       const te = Math.floor(x.entry_ts / 300) * 300, tx = Math.floor(x.exit_ts / 300) * 300;
-      if (te >= c.t[0] && te <= c.t[c.t.length - 1]) marks.push({ time: te, position: x.dir === "BUY" ? "belowBar" : "aboveBar", color: "#fff", shape: x.dir === "BUY" ? "arrowUp" : "arrowDown", text: `#${x.id} ${x.dir} ${x.entry}` });
-      if (tx >= c.t[0] && tx <= c.t[c.t.length - 1]) marks.push({ time: tx, position: "aboveBar", color: x.pnl >= 0 ? "#26a69a" : "#ef5350", shape: "circle", text: `#${x.id} ${x.exit_reason} ${money(x.pnl)}` });
-    }));
+      if (te >= c.t[0] && te <= c.t[c.t.length - 1]) marks.push({ time: te, position: x.dir === "BUY" ? "belowBar" : "aboveBar", color: "#fff", shape: x.dir === "BUY" ? "arrowUp" : "arrowDown", text: `${x.dir} ${x.entry}` });
+      if (tx >= c.t[0] && tx <= c.t[c.t.length - 1]) marks.push({ time: tx, position: "aboveBar", color: x.pnl >= 0 ? "#26a69a" : "#ef5350", shape: "circle", text: `${x.exit_reason.toUpperCase()} ${money(x.pnl)}` });
+    });
   }
   marks.sort((a, b) => a.time - b.time);
   candles.setMarkers(marks);
-  if (trade && trade.pair === pair) {
-    candles.createPriceLine({ price: trade.entry, color: "#ffffff", lineWidth: 1, lineStyle: 2, title: "entry" });
+
+  if (trade) {
+    candles.createPriceLine({ price: trade.entry, color: "#ffffff", lineWidth: 1, lineStyle: 2, title: "Entry" });
     candles.createPriceLine({ price: trade.sl, color: "#ef5350", lineWidth: 1, lineStyle: 0, title: "SL" });
     candles.createPriceLine({ price: trade.tp, color: "#26a69a", lineWidth: 1, lineStyle: 0, title: "TP" });
   }
+
   const hs = mc.addHistogramSeries({ priceFormat: { type: "price", precision: c.digits, minMove: Math.pow(10, -c.digits) }, priceLineVisible: false });
   hs.setData(c.t.map((t, i) => c.hist[i] == null ? { time: t } : { time: t, value: c.hist[i], color: c.hist_color[i] }));
-  hs.setMarkers(c.t.map((t, i) => c.hist_adjusted[i] ? { time: t, position: "aboveBar", color: c.hist_eff_green[i] ? "#26a69a" : "#ef5350", shape: "circle", size: 0.5 } : null).filter(Boolean));
   mc.addLineSeries({ color: "#2962ff", lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(c.t.map((t, i) => c.macd[i] == null ? { time: t } : { time: t, value: c.macd[i] }));
   mc.addLineSeries({ color: "#ff6d00", lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(c.t.map((t, i) => c.signal[i] == null ? { time: t } : { time: t, value: c.signal[i] }));
+
   let syncing = false;
   const sync = (a, b) => a.timeScale().subscribeVisibleLogicalRangeChange(r => { if (syncing || !r) return; syncing = true; b.timeScale().setVisibleLogicalRange(r); syncing = false; });
   sync(px, mc); sync(mc, px);
-  // crosshair shared by both panels + value read-out
-  const byT = new Map(c.t.map((t, i) => [t, i]));
-  let xs = false;
-  const legend = i => {
-    if (i == null) { $("#pxLegend").innerHTML = ""; return; }
-    const d = c.digits, f = v => v == null ? "–" : v.toFixed(d), pip = c.pip;
-    const above = c.c[i] > c.ema[i];
-    const edge = above ? Math.max(c.o[i], c.c[i]) - c.ema[i] : c.ema[i] - Math.min(c.o[i], c.c[i]);
-    const hv = c.hist[i], shown = hv == null ? "–" : hv.toFixed(d);
-    const zero = hv != null && Math.abs(hv) < 0.5 * Math.pow(10, -d);
-    $("#pxLegend").innerHTML = `<b>${fmtT(c.t[i])}</b> O ${f(c.o[i])} H ${f(c.h[i])} L ${f(c.l[i])} C ${f(c.c[i])} · range ${((c.h[i] - c.l[i]) / pip).toFixed(1)}p
-      <br><span style="color:#2962ff">EMA ${f(c.ema[i])}</span> · close ${above ? "above" : "below"} · body edge ${above ? "+" : "-"}${(edge / pip).toFixed(2)}p from EMA
-      · <span style="color:${c.dir[i] < 0 ? "#4caf50" : "#f23645"}">ST ${f(c.st[i])}</span>
-      <br><span style="color:${c.hist_color[i]}">Hist ${shown}</span> <span class="hint">(${hv == null ? "" : hv.toExponential(2)})${zero ? " → displays as 0" : ""}${c.hist_adjusted[i] ? ` → counted as ${c.hist_eff_green[i] ? "green" : "red"}` : ""}</span>`;
-  };
-  const link = (a, b, bSeries, val) => a.subscribeCrosshairMove(p => {
-    if (xs) return;
-    xs = true;
-    if (!p || p.time == null || !byT.has(p.time)) { b.clearCrosshairPosition(); legend(null); }
-    else { const i = byT.get(p.time); const v = val(i); if (v != null) b.setCrosshairPosition(v, p.time, bSeries); legend(i); }
-    xs = false;
-  });
-  link(px, mc, hs, i => c.hist[i]);
-  link(mc, px, candles, i => c.c[i]);
+
+  if (el.legend) {
+    const byT = new Map(c.t.map((t, i) => [t, i]));
+    let xs = false;
+    const legend = i => {
+      if (i == null) { el.legend.innerHTML = ""; return; }
+      const d = c.digits, f = v => v == null ? "–" : v.toFixed(d), pip = c.pip;
+      const above = c.c[i] > c.ema[i];
+      const edge = above ? Math.max(c.o[i], c.c[i]) - c.ema[i] : c.ema[i] - Math.min(c.o[i], c.c[i]);
+      const hv = c.hist[i], shown = hv == null ? "–" : hv.toFixed(d);
+      el.legend.innerHTML = `<b>${fmtT(c.t[i])}</b> O ${f(c.o[i])} H ${f(c.h[i])} L ${f(c.l[i])} C ${f(c.c[i])} · range ${((c.h[i] - c.l[i]) / pip).toFixed(1)}p
+        <br><span style="color:#2962ff">EMA ${f(c.ema[i])}</span> · ${above ? "above" : "below"} · <span style="color:${c.dir[i] < 0 ? "#4caf50" : "#f23645"}">ST ${f(c.st[i])}</span> · <span style="color:${c.hist_color[i]}">Hist ${shown}</span>`;
+    };
+    const link = (a, b, bSeries, val) => a.subscribeCrosshairMove(p => {
+      if (xs) return;
+      xs = true;
+      if (!p || p.time == null || !byT.has(p.time)) { b.clearCrosshairPosition(); legend(null); }
+      else { const i = byT.get(p.time); const v = val(i); if (v != null) b.setCrosshairPosition(v, p.time, bSeries); legend(i); }
+      xs = false;
+    });
+    link(px, mc, hs, i => c.hist[i]);
+    link(mc, px, candles, i => c.c[i]);
+  }
+
+  if (opt.fit) {
+    px.timeScale().fitContent();
+  } else {
+    const mid = Math.floor(c.t.length / 2);
+    px.timeScale().setVisibleLogicalRange({ from: mid - 50, to: mid + 50 });
+  }
+
+  return { px, mc };
+}
   const mid = Math.floor(c.t.length / 2);
   px.timeScale().setVisibleLogicalRange({ from: mid - 60, to: mid + 60 });
   $("#chInfo").textContent = `${pair} 5m · times ${tzName()} · grey = news blackout (${newsWin.news_before_min}/${newsWin.news_after_min} min) · green tint = ADX-confirmed session · H<n> = valid hook (n receding bars) · B = valid EMA BOS, B✗ = BOS candle too large (pips) · N = news (list below)`;
@@ -773,10 +910,7 @@ async function init() {
   $("#bePct").onchange = () => { const v = Math.min(100, Math.max(1, Number($("#bePct").value) || 50)); $("#bePct").value = v; setP("be_trigger_pct", v); };
   $("#beOff").onchange = () => setP("be_offset_pips", Number($("#beOff").value) || 0);
   $("#beRun").onclick = runBacktest;
-  const per = LS.get("momo.periods", null);
-  if (per && per.is.every(Boolean) && per.oos.every(Boolean)) {
-    [$("#isStart").value, $("#isEnd").value] = per.is; [$("#oosStart").value, $("#oosEnd").value] = per.oos; $("#oosOn").checked = per.on;
-  } else quickPeriod("tvmax");
+  quickPeriod("tvmax");
   $("#oosRow").style.display = $("#oosOn").checked ? "" : "none";
   $("#oosOn").onchange = () => { $("#oosRow").style.display = $("#oosOn").checked ? "" : "none"; periodsFromUI(); };
   ["#isStart", "#isEnd", "#oosStart", "#oosEnd"].forEach(s => $(s).onchange = periodsFromUI);
