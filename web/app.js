@@ -548,7 +548,7 @@ async function loadSingleTradeChart(card) {
   try {
     const c = await api("/api/chart", { params: P, pair: t.pair, center: t.entry_time, start: s, end: e, before, after });
     pxEl.innerHTML = "";
-    const res = plotChart(c, t.pair, t, { px: pxEl, macd: mcEl, legend: legendEl }, { show: new Set(["trade", "hook", "bos", "st"]), onlyTrade: true, fit: true });
+    const res = plotChart(c, t.pair, t, { px: pxEl, macd: mcEl, legend: legendEl }, { show: new Set(["trade"]), onlyTrade: true, fit: true });
     state.tradeCharts.push(res.px, res.mc);
   } catch (err) {
     pxEl.innerHTML = `<div class="tc-loading hint">Failed to load chart: ${esc(err.message)}</div>`;
@@ -607,7 +607,7 @@ function drawChart(c, pair, trade) {
 }
 
 function plotChart(c, pair, trade, el, opt = {}) {
-  const show = opt.show || new Set(["trade", "hook", "bos", "st"]);
+  const show = opt.show || new Set(["trade"]);
   const px = baseChart(el.px, { rightPriceScale: { borderColor: "#2a303b", scaleMargins: { top: 0.08, bottom: 0.08 } } });
   const mc = baseChart(el.macd);
   const fmt = { type: "price", precision: c.digits, minMove: Math.pow(10, -c.digits) };
@@ -645,10 +645,12 @@ function plotChart(c, pair, trade, el, opt = {}) {
     if (m.kind === "ind1" && show.has("ind1")) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: "#ce93d8", shape: m.d > 0 ? "arrowUp" : "arrowDown", text: "I1" });
     if (m.kind === "ind2" && show.has("ind2")) marks.push({ time: t, position: m.d > 0 ? "belowBar" : "aboveBar", color: "#80deea", shape: m.d > 0 ? "arrowUp" : "arrowDown", text: "I2" });
   });
-  (c.news || []).forEach(n => {
-    const t = Math.floor(n.t / 300) * 300;
-    if (t >= c.t[0] && t <= c.t[c.t.length - 1]) marks.push({ time: t, position: "aboveBar", color: "#b0b7c3", shape: "square", text: `N` });
-  });
+  if (show.has("news")) {
+    (c.news || []).forEach(n => {
+      const t = Math.floor(n.t / 300) * 300;
+      if (t >= c.t[0] && t <= c.t[c.t.length - 1]) marks.push({ time: t, position: "aboveBar", color: "#b0b7c3", shape: "square", text: `N` });
+    });
+  }
 
   if (show.has("trade")) {
     const list = opt.onlyTrade && trade ? [trade] : [].concat(...runs().map(r => r.result.trades.filter(x => x.pair === pair)));
@@ -669,8 +671,6 @@ function plotChart(c, pair, trade, el, opt = {}) {
 
   const hs = mc.addHistogramSeries({ priceFormat: { type: "price", precision: c.digits, minMove: Math.pow(10, -c.digits) }, priceLineVisible: false });
   hs.setData(c.t.map((t, i) => c.hist[i] == null ? { time: t } : { time: t, value: c.hist[i], color: c.hist_color[i] }));
-  mc.addLineSeries({ color: "#2962ff", lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(c.t.map((t, i) => c.macd[i] == null ? { time: t } : { time: t, value: c.macd[i] }));
-  mc.addLineSeries({ color: "#ff6d00", lineWidth: 1, priceLineVisible: false, lastValueVisible: false }).setData(c.t.map((t, i) => c.signal[i] == null ? { time: t } : { time: t, value: c.signal[i] }));
 
   let syncing = false;
   const sync = (a, b) => a.timeScale().subscribeVisibleLogicalRangeChange(r => { if (syncing || !r) return; syncing = true; b.timeScale().setVisibleLogicalRange(r); syncing = false; });
