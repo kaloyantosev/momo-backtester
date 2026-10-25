@@ -211,23 +211,54 @@ def backtest(req: BacktestReq):
 
 @app.post("/api/chart")
 def chart(req: ChartReq):
-    P = merge_params(req.params)
-    a, b = _period(req.start, req.end)
-    if req.pair not in PAIRS:
+    ctx = _chart_context(req.params, req.pair, req.start, req.end)
+    return JSONResponse(_clean(_chart_window(ctx, req.pair, req.center, req.before, req.after)))
+
+
+class TradeChartsReq(BaseModel):
+    params: dict = {}
+    pair: str
+    centers: list[str]
+    start: str
+    end: str
+    before: int = 60
+    after: int = 60
+
+
+@app.post("/api/trade_charts")
+def trade_charts(req: TradeChartsReq):
+    """Chart windows for several trades of one pair; indicators are computed once."""
+    ctx = _chart_context(req.params, req.pair, req.start, req.end)
+    return JSONResponse(_clean([_chart_window(ctx, req.pair, c, req.before, req.after) for c in req.centers[:50]]))
+
+
+def _chart_context(params: dict, pair: str, start: str, end: str) -> dict:
+    P = merge_params(params)
+    a, b = _period(start, end)
+    if pair not in PAIRS:
         raise HTTPException(400, "unknown pair")
-    data = store.get(req.pair, P["source"], a, b)
+    data = store.get(pair, P["source"], a, b)
     events = load_events(CACHE / "calendar", (a - pd.Timedelta(days=3)).date(), (b + pd.Timedelta(days=10)).date())
     pp = prepare(data, P)
     eff, adj, hooks, bos, flips = build_events(pp, P)
     tab = session_table(pp, P)
-    ntimes, nrows = news_times(events, req.pair, P)
-    center = int(pd.Timestamp(req.center).timestamp())
+    ntimes, nrows = news_times(events, pair, P)
+    i1, i2 = pine_indicator_signals(pp, P, tab, ntimes)
+    return dict(P=P, pp=pp, eff=eff, adj=adj, hooks=hooks, bos=bos, flips=flips, tab=tab,
+                ntimes=ntimes, nrows=nrows, i1=i1, i2=i2)
+
+
+def _chart_window(ctx: dict, pair: str, center_iso: str, before: int, after: int) -> dict:
+    P, pp, eff, adj, hooks, bos, flips, tab = (ctx[k] for k in ("P", "pp", "eff", "adj", "hooks", "bos", "flips", "tab"))
+    ntimes, nrows, i1, i2 = ctx["ntimes"], ctx["nrows"], ctx["i1"], ctx["i2"]
+    center = int(pd.Timestamp(center_iso).timestamp())
     ci = int(np.searchsorted(pp.t5, center))
-    lo, hi = max(ci - req.before, 0), min(ci + req.after, len(pp.t5))
+    lo, hi = max(ci - before, 0), min(ci + after, len(pp.t5))
+    if hi <= lo:
+        raise HTTPException(404, "no bars around this time")
     sl = slice(lo, hi)
     t = pp.t5[sl]
     tl = _local_epochs(t, P["tz"])
-    i1, i2 = pine_indicator_signals(pp, P, tab, ntimes)
     marks = []
     for i, (d, k, ok) in hooks.items():
         if lo <= i < hi:
@@ -259,13 +290,13 @@ def chart(req: ChartReq):
     from .engine.strategy import gate as gate_fn
     for j in range(lo, hi):
         gate_ok.append(bool(gate_fn(pp, P, tab, j)[0]))
-    return JSONResponse(_clean({
+    return {
         "t": t.tolist(), "tl": tl, "o": pp.o[sl].tolist(), "h": pp.h[sl].tolist(), "l": pp.l[sl].tolist(),
         "c": pp.c[sl].tolist(), "ema": pp.ema[sl].tolist(), "st": pp.st[sl].tolist(), "dir": pp.sdir[sl].tolist(),
         "hist": hist.tolist(), "hist_color": colors, "hist_adjusted": adj[sl].tolist(), "hist_eff_green": eff[sl].tolist(),
         "macd": pp.macd[sl].tolist(), "signal": pp.sig[sl].tolist(), "marks": marks, "news": news, "gate": gate_ok,
-        "pip": pp.pip, "digits": 3 if req.pair.endswith("JPY") else 5,
-    }))
+        "pip": pp.pip, "digits": 3 if pair.endswith("JPY") else 5,
+    }
 
 
 @app.post("/api/settings")
@@ -397,6 +428,7 @@ def verify_tv(body: dict):
 app.add_api_route("/config", config, methods=["GET"])
 app.add_api_route("/backtest", backtest, methods=["POST"])
 app.add_api_route("/chart", chart, methods=["POST"])
+app.add_api_route("/trade_charts", trade_charts, methods=["POST"])
 app.add_api_route("/settings", settings, methods=["POST"])
 app.add_api_route("/tv/download", tv_download, methods=["POST"])
 app.add_api_route("/tv/download", tv_download_status, methods=["GET"])
