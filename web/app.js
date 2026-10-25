@@ -113,7 +113,12 @@ const num = (v, d = 2) => v == null ? "–" : Number(v).toLocaleString("en-US", 
 const pct = (v, d = 2) => v == null ? "–" : num(v, d) + "%";
 const cls = v => v == null ? "" : v > 0 ? "pos" : v < 0 ? "neg" : "";
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const isoDate = d => d.toISOString().slice(0, 10);
+const isoDate = d => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
 
 // ------------------------------------------------------------------ params UI
 function buildParams() {
@@ -170,11 +175,10 @@ function syncBe() {
   $("#beOn").checked = !!state.params.be_enabled; $("#bePct").value = state.params.be_trigger_pct; $("#beOff").value = state.params.be_offset_pips;
 }
 function setDateBounds() {
-  let min = "";
-  if (state.params.source === "tradingview") {
-    Object.values(state.cfg.coverage || {}).forEach(c => { if (c.tv_5) { const d = c.tv_5[0].slice(0, 10); if (d > min) min = d; } });
-  }
-  ["#isStart", "#isEnd", "#oosStart", "#oosEnd"].forEach(s => { $(s).min = min; $(s).max = isoDate(new Date()); });
+  ["#isStart", "#isEnd", "#oosStart", "#oosEnd"].forEach(s => {
+    $(s).removeAttribute("min");
+    $(s).removeAttribute("max");
+  });
 }
 function saveParams() { LS.set("momo.params", state.params); }
 function updateBadge() {
@@ -202,22 +206,9 @@ function setPeriods(a, b, split) {
 function quickPeriod(q) {
   const today = new Date();
   if (q === "tvmax") {
-    const cov = (state.cfg && state.cfg.coverage) || {};
-    let first = null, last = null;
-    Object.values(cov).forEach(c => {
-      if (c.tv_5) {
-        const f = new Date(c.tv_5[0]), l = new Date(c.tv_5[1]);
-        if (!first || f > first) first = f;
-        if (!last || l < last) last = l;
-      }
-    });
-    if (!first) {
-      first = new Date(today.getTime() - 26 * 86400000);
-      last = today;
-    }
-    const warmStart = new Date(first.getTime() + 2 * 86400000);
-    $("#isStart").value = isoDate(warmStart);
-    $("#isEnd").value = isoDate(last);
+    const fourWeeksAgo = new Date(today.getTime() - 28 * 86400000);
+    $("#isStart").value = isoDate(fourWeeksAgo);
+    $("#isEnd").value = isoDate(today);
     $("#oosOn").checked = false;
     $("#oosRow").style.display = "none";
     periodsFromUI();
