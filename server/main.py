@@ -11,9 +11,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+import tempfile
 
 from .data import tradingview as tv_mod
 from .data.calendar import load_events
@@ -23,7 +24,24 @@ from .engine.strategy import DEFAULTS, build_events, merge_params, news_times, p
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
-CACHE = ROOT / "data_cache"
+
+def _resolve_cache_dir() -> Path:
+    # On serverless platforms (Vercel, AWS Lambda), the deployment root is read-only.
+    # Fallback to the writable system temp directory.
+    if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("LAMBDA_TASK_ROOT"):
+        d = Path(tempfile.gettempdir()) / "momo_data_cache"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    try:
+        d = ROOT / "data_cache"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+    except (OSError, PermissionError):
+        d = Path(tempfile.gettempdir()) / "momo_data_cache"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+CACHE = _resolve_cache_dir()
 
 
 def _load_env():
@@ -37,7 +55,23 @@ def _load_env():
 _load_env()
 store = DataStore(CACHE)
 app = FastAPI(title="EMA+ST+MACD backtester")
-app.mount("/static", StaticFiles(directory=ROOT / "web"), name="static")
+
+def _find_web_dir() -> Path | None:
+    candidates = [
+        ROOT / "web",
+        Path.cwd() / "web",
+        Path(__file__).resolve().parent.parent / "web",
+        Path("/var/task/web"),
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return None
+
+WEB_DIR = _find_web_dir()
+if WEB_DIR is not None and WEB_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
 
 
 def _clean(o):
@@ -112,7 +146,12 @@ class SettingsReq(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "web" / "index.html")
+    if WEB_DIR is not None:
+        idx = WEB_DIR / "index.html"
+        if idx.is_file():
+            return FileResponse(idx)
+    return HTMLResponse("<h1>MOMO Backtester</h1><p>Server is running.</p>")
+
 
 
 @app.get("/api/config")
@@ -242,11 +281,12 @@ def settings(req: SettingsReq):
         if v is not None:
             cur[k] = v.strip()
             os.environ[k] = v.strip()
-    ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in cur.items()))
     try:
+        ENV_FILE.write_text("".join(f"{k}={v}\n" for k, v in cur.items()))
         ENV_FILE.chmod(0o600)
     except OSError:
         pass
+
     status = {}
     if os.environ.get("OANDA_TOKEN"):
         try:
