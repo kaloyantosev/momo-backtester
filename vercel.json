@@ -2,21 +2,21 @@
   "version": 2,
   "functions": {
     "api/index.py": {
-      "includeFiles": "web/**",
+      "includeFiles": "server/**",
       "maxDuration": 60
     }
   },
   "rewrites": [
     {
-      "source": "/static/(.*)",
-      "destination": "/web/$1"
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
     },
     {
-      "source": "/",
-      "destination": "/web/index.html"
+      "source": "/docs",
+      "destination": "/api/index.py"
     },
     {
-      "source": "/(.*)",
+      "source": "/openapi.json",
       "destination": "/api/index.py"
     }
   ]
