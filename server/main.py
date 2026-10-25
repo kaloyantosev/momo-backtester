@@ -351,3 +351,10 @@ def verify_tv(body: dict):
                      "max_abs_diff_pips": float(diff.max() / pp.pip) if len(diff) else None,
                      "plots_available": list(study.columns)}
     return _clean(out)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("server.main:app", host="0.0.0.0", port=port, reload=False)
+

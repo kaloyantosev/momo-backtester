@@ -5,15 +5,55 @@ A local server with a browser dashboard that backtests the strategy on the six O
 (`OANDA:<PAIR>` symbols) and news comes from TradingView's economic calendar. An optional OANDA API
 token adds years of history and 5-second precision.
 
-## Run
+## How to Run Locally
 
+### Windows
+Double click `run_win.bat` or run in PowerShell / Command Prompt:
+```cmd
+run_win.bat
+```
+
+### Linux / Mac
 ```bash
 ./run.sh
 ```
 
-Then open http://127.0.0.1:8000. On the first run `run.sh` creates `.venv` and installs `requirements.txt`.
+Then open http://127.0.0.1:8000.
 
-Tests: `.venv/bin/python -m pytest -q tests`
+Run tests:
+```bash
+pytest tests
+```
+
+---
+
+## Upload to GitHub & Deploy Online
+
+> **Note:** Because this project has a Python backend (FastAPI, calculation engine, live websocket/API connections), it cannot run on **GitHub Pages** (which only serves static HTML). To host it online for free, push this repository to GitHub and connect it to a free cloud hosting service like **Render** or **Railway**.
+
+### Step 1: Push to GitHub
+1. Create a new empty repository on [GitHub](https://github.com/new) (e.g. `momo-backtester`).
+2. Run the following commands in this directory:
+```bash
+git add .
+git commit -m "Initial commit of MOMO Backtester"
+git branch -M main
+git remote add origin https://github.com/<YOUR_USERNAME>/<YOUR_REPO>.git
+git push -u origin main
+```
+
+### Step 2: Deploy Online (e.g. on Render - Free)
+1. Sign in to [Render.com](https://render.com) (free).
+2. Click **New +** -> **Web Service**.
+3. Connect your GitHub repository.
+4. Render will automatically detect the settings from `render.yaml` / `Procfile`:
+   - **Environment**: Python 3
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn server.main:app --host 0.0.0.0 --port $PORT`
+5. Click **Create Web Service**. Within 2 minutes, your backtester is live at a public URL (e.g. `https://momo-backtester.onrender.com`)!
+
+*(Alternative: You can also deploy with 1-click via Docker using the included `Dockerfile` on Railway, Fly.io, or any VPS).*
+
 
 ## Data sources and their limits
 
