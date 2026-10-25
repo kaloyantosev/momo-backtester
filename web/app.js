@@ -708,11 +708,6 @@ function plotChart(c, pair, trade, el, opt = {}) {
 
   return { px, mc };
 }
-  const mid = Math.floor(c.t.length / 2);
-  px.timeScale().setVisibleLogicalRange({ from: mid - 60, to: mid + 60 });
-  $("#chInfo").textContent = `${pair} 5m · times ${tzName()} · grey = news blackout (${newsWin.news_before_min}/${newsWin.news_after_min} min) · green tint = ADX-confirmed session · H<n> = valid hook (n receding bars) · B = valid EMA BOS, B✗ = BOS candle too large (pips) · N = news (list below)`;
-  $("#chNews").innerHTML = c.news.length ? c.news.map(n => `${fmtT(n.t)} — ${esc(n.title)} ${n.imp > 0 ? "(high)" : "(medium)"}`).join("<br>") : "No relevant news in this window.";
-}
 
 // ------------------------------------------------------------------ breakdown
 function tableFrom(rows, cols) {
