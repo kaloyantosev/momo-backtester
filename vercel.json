@@ -1,5 +1,4 @@
 {
-  "version": 2,
   "functions": {
     "api/index.py": {
       "includeFiles": "server/**",
@@ -8,16 +7,8 @@
   },
   "rewrites": [
     {
-      "source": "/api/(.*)",
-      "destination": "/api/index.py"
-    },
-    {
-      "source": "/docs",
-      "destination": "/api/index.py"
-    },
-    {
-      "source": "/openapi.json",
-      "destination": "/api/index.py"
+      "source": "/api/:path*",
+      "destination": "/api"
     }
   ]
 }

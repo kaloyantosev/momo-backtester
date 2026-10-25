@@ -393,6 +393,28 @@ def verify_tv(body: dict):
     return _clean(out)
 
 
+# Alias routes without /api prefix to support all Vercel and reverse-proxy routing variations
+app.add_api_route("/config", config, methods=["GET"])
+app.add_api_route("/backtest", backtest, methods=["POST"])
+app.add_api_route("/chart", chart, methods=["POST"])
+app.add_api_route("/settings", settings, methods=["POST"])
+app.add_api_route("/tv/download", tv_download, methods=["POST"])
+app.add_api_route("/tv/download", tv_download_status, methods=["GET"])
+app.add_api_route("/tv/download/cancel", tv_download_cancel, methods=["POST"])
+app.add_api_route("/tv/entitlements", tv_entitlements, methods=["GET"])
+app.add_api_route("/verify_tv", verify_tv, methods=["POST"])
+
+
+@app.middleware("http")
+async def normalize_api_path_middleware(request, call_next):
+    path = request.scope.get("path", "")
+    for prefix in ("/api/index.py", "/index.py", "/api/index", "/index"):
+        if path.startswith(prefix):
+            request.scope["path"] = path[len(prefix):] or "/"
+            break
+    return await call_next(request)
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))

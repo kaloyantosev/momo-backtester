@@ -218,8 +218,14 @@ function quickPeriod(q) {
 // ------------------------------------------------------------------ API
 async function api(path, body) {
   const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
-  const j = await r.json().catch(() => ({ detail: r.statusText }));
-  if (!r.ok) throw new Error(j.detail || r.statusText);
+  let j;
+  try {
+    j = await r.json();
+  } catch {
+    const text = await r.text().catch(() => "");
+    j = { detail: text.slice(0, 200) || `HTTP ${r.status} ${r.statusText || "Error"}` };
+  }
+  if (!r.ok) throw new Error(j.detail || `HTTP ${r.status} ${r.statusText || "Error"}`);
   return j;
 }
 function busy(on, msg) { $("#busy").hidden = !on; if (msg) $("#busyMsg").textContent = msg; }
