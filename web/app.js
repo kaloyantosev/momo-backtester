@@ -217,6 +217,8 @@ function quickPeriod(q) {
 
 // ------------------------------------------------------------------ API
 async function api(path, body) {
+  // Vercel reserves /api/* paths, so call the prefix-less aliases the server also exposes.
+  path = path.replace(/^\/api\//, "/");
   const r = await fetch(path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {});
   let j;
   try {
