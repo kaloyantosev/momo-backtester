@@ -216,6 +216,16 @@ function setPeriods(a, b, split) {
 }
 function quickPeriod(q) {
   const today = new Date();
+  if (q === "1m") {
+    const a = new Date(today);
+    a.setMonth(a.getMonth() - 1);
+    $("#isStart").value = isoDate(a);
+    $("#isEnd").value = isoDate(today);
+    $("#oosOn").checked = false;
+    $("#oosRow").style.display = "none";
+    periodsFromUI();
+    return;
+  }
   if (q === "oandanews") { setPeriods(new Date("2008-02-01T00:00:00Z"), today, 0.7); return; }
   if (q === "oandafull") { setPeriods(new Date("2005-02-15T00:00:00Z"), today, 0.7); return; }
   if (q === "tvmax") {
@@ -1040,6 +1050,8 @@ async function init() {
   LS.set("momo.v12", true);
   if (saved && !LS.get("momo.v13", false)) { delete saved.fill_basis; LS.set("momo.params", saved); }
   LS.set("momo.v13", true);
+  if (saved && !LS.get("momo.v14", false)) { delete saved.news_before_min; LS.set("momo.params", saved); }
+  LS.set("momo.v14", true);
   if (saved) Object.entries(saved).forEach(([k, v]) => { if (k in state.params) state.params[k] = (typeof v === "object" && !Array.isArray(v) && v) ? { ...state.params[k], ...v } : v; });
   setTZ(state.params.tz);
   buildParams(); updateBadge(); syncBe(); setDateBounds();
@@ -1047,8 +1059,7 @@ async function init() {
   $("#bePct").onchange = () => { const v = Math.min(100, Math.max(1, Number($("#bePct").value) || 50)); $("#bePct").value = v; setP("be_trigger_pct", v); };
   $("#beOff").onchange = () => setP("be_offset_pips", Number($("#beOff").value) || 0);
   $("#beRun").onclick = runBacktest;
-  quickPeriod(state.params.source === "oanda" ? "oandanews" : "tvmax");
-  if (state.params.source === "oanda") $("#oosOn").checked = true;
+  quickPeriod("1m");
   $("#oosRow").style.display = $("#oosOn").checked ? "" : "none";
   $("#oosOn").onchange = () => { $("#oosRow").style.display = $("#oosOn").checked ? "" : "none"; periodsFromUI(); };
   ["#isStart", "#isEnd", "#oosStart", "#oosEnd"].forEach(s => $(s).onchange = periodsFromUI);

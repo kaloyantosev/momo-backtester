@@ -27,12 +27,13 @@
         <label>In-sample start<input type="date" id="isStart"></label>
         <label>In-sample end<input type="date" id="isEnd"></label>
       </div>
-      <label class="chk"><input type="checkbox" id="oosOn" checked> Out-of-sample period</label>
+      <label class="chk"><input type="checkbox" id="oosOn"> Out-of-sample period</label>
       <div class="row2" id="oosRow">
         <label>OOS start<input type="date" id="oosStart"></label>
         <label>OOS end<input type="date" id="oosEnd"></label>
       </div>
       <div class="quick">
+        <button class="mini" data-q="1m">Last 1 month</button>
         <button class="mini" data-q="oandanews">2008 → now, with news (split 70/30)</button>
         <button class="mini" data-q="oandafull">2005 → now, no news before 2008 (split 70/30)</button>
         <button class="mini" data-q="tvmax">TradingView max (split 60/40)</button>
@@ -208,6 +209,6 @@
 </dialog>
 
 <div id="busy" hidden><div class="spinner"></div><div id="busyMsg">Running…</div></div>
-<script src="/static/app.js?v=17"></script>
+<script src="/static/app.js?v=18"></script>
 </body>
 </html>

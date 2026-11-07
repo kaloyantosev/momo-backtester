@@ -118,10 +118,48 @@ class S5Cache:
     def __init__(self, path: Path):
         self.path = path
         self.root = path.parent
+        self.packed_path = path.parent.parent / "s5.parquet"
         self.lock = threading.Lock()
         self._db: sqlite3.Connection | None = None
+        self._packed: dict[str, tuple[np.ndarray, np.ndarray]] | None = None
         self._have: dict[str, set[int]] = {}
         self._months: OrderedDict = OrderedDict()
+
+    def _load_packed(self) -> None:
+        if self._packed is not None:
+            return
+        with self.lock:
+            if self._packed is not None:
+                return
+            self._packed = {}
+            if not self.packed_path.exists():
+                return
+            raw = pd.read_parquet(self.packed_path)
+            for idx_p, pair in enumerate(PAIRS):
+                sub = raw[raw["pair"] == idx_p]
+                if sub.empty:
+                    continue
+                ts = sub["t"].to_numpy(np.int64)
+                u_bc = sub["bo"].to_numpy(np.int32)
+                u_prev_bc = np.empty_like(u_bc)
+                u_prev_bc[0] = u_bc[0]
+                u_prev_bc[1:] = u_bc[:-1]
+                u_bo = u_prev_bc + sub["bh"].to_numpy(np.int32)
+                u_bh = np.maximum(u_bo, u_bc) + sub["bl"].to_numpy(np.int32)
+                u_bl = np.minimum(u_bo, u_bc) - sub["bc"].to_numpy(np.int32)
+                u_so = sub["ao"].to_numpy(np.int32)
+                u_ao = u_bo + u_so
+                u_ah = u_bh + u_so + sub["ah"].to_numpy(np.int32)
+                u_al = u_bl + u_so + sub["al"].to_numpy(np.int32)
+                u_ac = u_bc + u_so + sub["ac"].to_numpy(np.int32)
+                u_mo = (u_bo + u_ao + sub["mo"].to_numpy(np.int32)) // 2
+                u_mh = (u_bh + u_ah + sub["mh"].to_numpy(np.int32)) // 2
+                u_ml = (u_bl + u_al + sub["ml"].to_numpy(np.int32)) // 2
+                u_mc = (u_bc + u_ac + sub["mc"].to_numpy(np.int32)) // 2
+                scale = _ticks_per_unit(pair)
+                prices = np.column_stack([u_bo, u_bh, u_bl, u_bc, u_ao, u_ah, u_al, u_ac, u_mo, u_mh, u_ml, u_mc]) / scale
+                self._packed[pair] = (ts, np.column_stack([ts.astype(float), prices]))
+                self._have.setdefault(pair, set()).update(int(x) for x in np.unique(ts // 300 * 300))
 
     @property
     def db(self) -> sqlite3.Connection:
@@ -135,6 +173,7 @@ class S5Cache:
         return self._db
 
     def _known(self, pair: str) -> set[int]:
+        self._load_packed()
         if pair not in self._have:
             if not self.path.exists():
                 self._have[pair] = set()
@@ -191,6 +230,12 @@ class S5Cache:
 
     def get(self, pair: str, t0: int, t1: int) -> np.ndarray:
         """rows with t in [t0, t1): columns t,bo,bh,bl,bc,ao,ah,al,ac,mo,mh,ml,mc"""
+        self._load_packed()
+        if self._packed and pair in self._packed:
+            ts, arr = self._packed[pair]
+            i, j = int(np.searchsorted(ts, t0, side="left")), int(np.searchsorted(ts, t1, side="left"))
+            if j > i:
+                return arr[i:j]
         a = self._month(pair, t0)
         if a is not None and self._month_file(pair, t1 - 1) == self._month_file(pair, t0):
             i, j = np.searchsorted(a[0], t0), np.searchsorted(a[0], t1)

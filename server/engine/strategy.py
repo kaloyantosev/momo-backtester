@@ -40,7 +40,7 @@ DEFAULTS: dict = {
     "use_news": True,
     "news_countries": ["US", "EU", "CH", "AU", "JP"],
     "news_min_importance": 0,         # -1 low, 0 medium (2 stars), 1 high (3 stars)
-    "news_before_min": 10, "news_after_min": 10,
+    "news_before_min": 20, "news_after_min": 10,
     "news_scope": "pair",             # pair (only news of the pair's currencies) | all
     "news_block_setup_bars": False,   # also reject if any setup bar overlaps a news window
     "close_before_news_min": 10,      # 0 = off
