@@ -24,18 +24,18 @@ def hooks_of(h, mode="literal", hmin=2, hmax=5):  # most tests pin the 'literal'
 # ------------------------------------------------------------------ MACD hook
 def test_plain_bull_hook_counts_light_red_bars():
     hk, _, _ = hooks_of([-5e-5, -8e-5, -6e-5, -4e-5, -2e-5, 3e-5])
-    assert hk[5] == (1, 3, True)  # 3 receding (light red) bars, then green
+    assert hk[5][:3] == (1, 3, True)  # 3 receding (light red) bars, then green
 
 
 def test_too_many_receding_bars_invalid():
     hk, _, _ = hooks_of([-9e-5, -8e-5, -7e-5, -6e-5, -5e-5, -4e-5, -3e-5, 2e-5])
-    d, k, ok = hk[7]
+    d, k, ok = hk[7][:3]
     assert d == 1 and k == 6 and not ok
 
 
 def test_bear_hook():
     hk, _, _ = hooks_of([5e-5, 8e-5, 6e-5, 4e-5, -1e-5])
-    assert hk[4] == (-1, 2, True)
+    assert hk[4][:3] == (-1, 2, True)
 
 
 def test_zero_bar_before_flip_shown_red_becomes_green_flip_moves_earlier():
@@ -83,6 +83,7 @@ def test_bos_only_on_crossing_candle_body_not_wick():
     pp.ema[:] = 1.1000
     # crossing candle: body top 0.9 pip above EMA -> valid
     pp.o[40], pp.c[40], pp.h[40], pp.l[40] = 1.09995, 1.10009, 1.10015, 1.09990
+    pp.c[44] = pp.c[49] = 1.09995   # closes back below the EMA, so bars 45 and 50 are new crosses
     # crossing candle: close 0.5 pip above, wick 3 pips above -> wick does not count -> invalid
     pp.o[45], pp.c[45], pp.h[45], pp.l[45] = 1.09995, 1.10005, 1.10030, 1.09990
     # next candle closes 2 pips above but did not cross the EMA itself -> no BOS (no rescue)
@@ -113,12 +114,16 @@ def test_confluence_windows():
     pp, P = make_pp([1.1] * 60)
     flips = {20: 1}
     bos = {21: (1, 1.0, 3.0, True)}           # BOS one bar after the ST flip -> span 20..21
-    for H, expect in ((23, True), (24, False), (19, True), (18, False)):
+    # Supertrend flips first (bar 20) -> MACD must flip on bar 20 or 21; MACD first -> within 3 bars
+    for H, expect in ((21, True), (22, False), (23, False), (19, True), (18, False)):
         hooks = {H: (1, 3, True)}
         got = build_candidates(pp, P, hooks, bos, flips)
         assert bool(got) == expect, (H, got)
         if got:
             assert got[0]["C"] == max(H, 21)
+    # with the "MACD within 1 bar of the ST flip" rule relaxed, the old 2-bars-after-span window applies
+    P3 = dict(P, macd_after_st_max=3)
+    assert build_candidates(pp, P3, {23: (1, 3, True)}, bos, flips) and not build_candidates(pp, P3, {24: (1, 3, True)}, bos, flips)
     # BOS before the ST flip is not allowed by default (indicator 1 allows up to 2 bars)
     assert not build_candidates(pp, P, {21: (1, 3, True)}, {19: (1, 1.0, 3.0, True)}, flips)
     P2 = dict(P, bos_before_st_max=2)
@@ -203,7 +208,7 @@ def test_against_mode_zero_bar_before_flip_stays_old_colour():
     h = [-9e-5, -8e-5, -6.8e-5, -3.8e-5, -1.1e-6, 1.71e-5, 4.6e-6]
     hk, eff, adj = hooks_of(h, mode="against")
     assert not eff[4] and not adj[4]                # stays red
-    assert 4 not in hk and hk[5] == (1, 4, True)    # hook on the first real green bar
+    assert 4 not in hk and hk[5][:3] == (1, 4, True)    # hook on the first real green bar
     hk2, _, _ = hooks_of(h, mode="literal")
     assert 4 in hk2                                 # the other reading puts the hook on the 0-bar
 
@@ -313,3 +318,65 @@ def test_entry_candle_ema_cross_exit():
     t, px, why, *_ = simulate_exit(pa, 1, k, T, E, SL, TP, t_close, "ema_exit", "pessimistic")
     assert why == "ema_exit"
     assert t == t_close
+
+
+def test_flat_hook_rejected():
+    # last two red bars both display -0.00001 (AUDUSD 05.10 15:15 / 15:20) -> no valid flip
+    h = [-4e-5, -3.7e-5, -3.1e-5, -1.85e-5, -0.87e-5, -0.869e-5, 0.69e-5]
+    hk, _, _ = hooks_of(h, mode="zero_is_red")
+    assert hk[6][2]                                   # without the rule it is a valid 4-bar hook
+    eff, _ = effective_colors(np.array(h), EPS, "zero_is_red")
+    d, k, ok, why = find_hooks(np.array(h), eff, 2, 5, tick=1e-5, flat=True)[6]
+    assert not ok and "same value" in why
+
+
+def test_zero_bar_is_red_shortens_bear_hook():
+    # AUDUSD 30.09: ..., 14:35 +0.0000297, 14:40 +0.0000250, 14:45 +0.0000018 (shows 0.00000), 14:50 -0.0000088
+    h = [1e-5, 2.1e-5, 2.97e-5, 2.5e-5, 0.18e-5, -0.88e-5]
+    hk, eff, _ = hooks_of(h, mode="zero_is_red")
+    assert not eff[4]                                 # the 0.00000 bar counts as red
+    assert hk[4][0] == -1 and hk[4][1] == 1 and not hk[4][2]   # only 1 fading green bar -> invalid
+    assert 5 not in hk
+
+
+def test_zero_bar_is_opposite_of_painted_colour():
+    # EURJPY 13.03 sells: 5 fading green, then -0.0002 (shows -0.000, painted red) counts as green = 6 bars -> invalid
+    eps = 0.5e-3
+    h = np.array([0.0120, 0.0136, 0.0120, 0.0087, 0.0064, 0.0057, 0.0017, -0.0002, -0.0013])
+    eff, _ = effective_colors(h, eps, "literal")
+    assert eff[7]
+    d, k, ok, _ = find_hooks(h, eff, 2, 5)[8]
+    assert (d, k, ok) == (-1, 6, False)
+    # AUDUSD 11.03 buys: 1 fading red, then -0.0000031 (shows 0.00000, painted red) counts as green = 1 bar -> invalid
+    h = np.array([-2.52e-5, -4.61e-5, -3.65e-5, -0.31e-5, 2.94e-5, 6.08e-5])
+    eff, _ = effective_colors(h, EPS, "literal")
+    assert eff[3]
+    d, k, ok, _ = find_hooks(h, eff, 2, 5)[3]
+    assert (d, k, ok) == (1, 1, False)
+    # AUDUSD 30.09 sells: +0.0000018 (shows 0.00000, painted green) counts as red = 1 fading green bar -> invalid
+    h = np.array([1e-5, 2.1e-5, 2.97e-5, 2.5e-5, 0.18e-5, -0.88e-5])
+    eff, _ = effective_colors(h, EPS, "literal")
+    assert not eff[4]
+    d, k, ok, _ = find_hooks(h, eff, 2, 5)[4]
+    assert (d, k, ok) == (-1, 1, False)
+
+
+def _bos_pp(c, ema, tick):
+    c, ema = np.array(c, float), np.array(ema, float)
+    class PP: pass
+    pp = PP()
+    pp.c, pp.o, pp.ema, pp.pip, pp.tick = c, np.r_[c[0], c[:-1]], ema, tick * 10, tick
+    pp.h, pp.l = np.maximum(pp.o, c), np.minimum(pp.o, c)
+    return pp
+
+
+def test_close_on_the_ema_is_not_a_new_cross():
+    # USDJPY 27.03: 13:10 crosses by 0.14 pip (invalid), 13:20 closes 0.08 tick above the EMA, 13:25 falls away: no new BOS
+    pp = _bos_pp([159.896, 159.876, 159.872, 159.877, 159.846],
+                 [159.8776, 159.8774, 159.8769, 159.876916, 159.874], 0.001)
+    bos = find_bos(pp, merge_params({}))
+    assert list(bos) == [1] and not bos[1][3]
+    # a close that is really above the EMA does reset it, and the next break is a new BOS
+    pp = _bos_pp([159.896, 159.876, 159.880, 159.846], [159.878, 159.8774, 159.877, 159.874], 0.001)
+    bos = find_bos(pp, merge_params({}))
+    assert list(bos) == [1, 2, 3] and bos[3][0] == -1 and bos[3][3]

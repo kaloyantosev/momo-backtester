@@ -228,3 +228,10 @@ td.g { color: var(--good); } td.r { color: var(--bad); }
   font-weight: 700;
 }
 
+.tc-setup { grid-column: 1 / -1; margin-top: 2px; overflow-x: auto; }
+.tc-setup label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; margin-bottom: 4px; }
+.tc-setup table { font-size: 12px; width: auto; min-width: 60%; }
+.tc-setup th, .tc-setup td { padding: 2px 5px; }
+.daychip { display: inline-block; padding: 2px 8px; margin: 2px 3px 2px 0; border-radius: 4px; background: #1e232c; font-size: 12px; }
+.daychip.pos { color: #26a69a; }
+.daychip.neg { color: #ef5350; }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MOMO Backtester</title>
-<link rel="stylesheet" href="/static/style.css?v=6">
+<link rel="stylesheet" href="/static/style.css?v=17">
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 </head>
@@ -33,6 +33,8 @@
         <label>OOS end<input type="date" id="oosEnd"></label>
       </div>
       <div class="quick">
+        <button class="mini" data-q="oandanews">2008 → now, with news (split 70/30)</button>
+        <button class="mini" data-q="oandafull">2005 → now, no news before 2008 (split 70/30)</button>
         <button class="mini" data-q="tvmax">TradingView max (split 60/40)</button>
         <button class="mini" data-q="12m">Last 12 months</button>
         <button class="mini" data-q="24m">Last 24 months</button>
@@ -59,6 +61,7 @@
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="trades">Trades</button>
       <button data-tab="chart">Chart inspector</button>
+      <button data-tab="day">Day review</button>
       <button data-tab="breakdown">Breakdown</button>
       <button data-tab="rejections">Setups & rejections</button>
       <button data-tab="rules">Rules & notes</button>
@@ -121,6 +124,18 @@
       <div id="macdChart" class="chart-macd"></div>
       <div class="hint">Histogram colours exactly as TradingView paints them. A small dot above a bar = its value displays as 0 and was re-interpreted (dot colour = colour used by the strategy).</div>
       <div class="card"><div class="card-h">Relevant news in view (<span class="tzname">BGN</span>)</div><div id="chNews" class="hint"></div></div>
+    </section>
+
+    <section id="tab-day" class="tab">
+      <div class="toolbar">
+        <button class="mini" id="dayPrev">◀ Day</button>
+        <input type="date" id="dayDate" value="2026-03-05">
+        <button class="mini" id="dayNext">Day ▶</button>
+        <button class="mini" id="dayLoad">Load day</button>
+      </div>
+      <div class="hint">All selected pairs for one day with the current settings, any date, no TradingView needed. Opens at 10:00–23:00 <span class="tzname">BGN</span>; scroll or drag for the rest of the day. Grey = news blackout, green tint = ADX-confirmed session, H = valid hook, B = EMA break, ST = Supertrend flip.</div>
+      <div class="card"><div id="dayTable"></div><div id="dayTrades" style="margin-top:6px"></div></div>
+      <div id="dayCharts"></div>
     </section>
 
     <section id="tab-breakdown" class="tab">
@@ -193,6 +208,6 @@
 </dialog>
 
 <div id="busy" hidden><div class="spinner"></div><div id="busyMsg">Running…</div></div>
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=17"></script>
 </body>
 </html>

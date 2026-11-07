@@ -7,6 +7,7 @@ The entry happens at open(C+1) + entry_delay_sec, using sub-minute data when ava
 from __future__ import annotations
 
 import copy
+import functools
 import math
 from dataclasses import dataclass, field
 
@@ -19,19 +20,20 @@ from . import indicators as ind
 DEFAULTS: dict = {
     # ---- general
     "pairs": ["EURJPY", "EURUSD", "AUDUSD", "GBPUSD", "USDJPY", "USDCHF"],
-    "source": "tradingview",          # tradingview | oanda
-    "price_basis": "bid",             # bid | mid  (signal price; TradingView plots bid)
+    "source": "oanda",                # oanda | tradingview | forexsb (Dukascopy, no longer offered in the dashboard)
+    "price_basis": "mid",             # bid | mid  (signal price; TradingView OANDA: bars are OANDA mid)
     "initial_balance": 10000.0,
     "lots": 0.2,
     "max_open_total": 6,              # one position per pair is always enforced
     # ---- costs
     "spread_pips": {"EURJPY": 0.0, "EURUSD": 0.0, "AUDUSD": 0.0, "GBPUSD": 0.0, "USDJPY": 0.0, "USDCHF": 0.0},
-    "commission_per_lot": 0.0,        # USD per 1.0 lot round turn
+    "commission_per_lot": 5.0,        # USD per 1.0 lot round turn
+    "fill_basis": "mid",              # mid: chart price + the fixed spread above, MT5 fills at bid = ask (needs 5-second data) | bid_ask: OANDA's own spread
     # ---- sessions / ADX (hours in `tz`)
     "tz": "Europe/Sofia",             # Bulgarian time (always London + 2h; both switch DST on the same dates)
     "use_adx_filter": True,
     "s1_check_hour": 11, "s1_end_hour": 15,   # 11:00 BGN = 09:00 London
-    "s2_check_hour": 15, "s2_end_hour": 21,   # 15:00 BGN = 13:00 London; 21:00 BGN = 19:00 London
+    "s2_check_hour": 15, "s2_end_hour": 22,   # 15:00 BGN = 13:00 London; 22:00 BGN = 20:00 London
     "adx_len": 10, "adx_min": 25.0, "adx_max": 40.0,
     "adx_bar": "completed",           # completed (no look-ahead) | check_bar (what 1H-chart labels show; look-ahead)
     # ---- news
@@ -47,19 +49,25 @@ DEFAULTS: dict = {
     "st_atr": 3, "st_factor": 1.5,
     "bos_buffer_pips": 0.8,
     "bos_max_range_pips": 12.0,
+    "ema_on_line_ticks": 0.25,        # a close within N ticks of the EMA sits on the line: it has not crossed it
     "bos_mode": "cross_candle",       # cross_candle: only the candle whose close crosses the EMA, body >= buffer | indicator
     "bos_after_st_max": 1,            # BOS may come 0..N bars AFTER the ST flip
     "bos_before_st_max": 0,           # BOS may come 0..N bars BEFORE the ST flip (indicator 1 uses 2)
-    "exit_on_entry_ema_cross": True,  # exit immediately if entry candle closes back across EMA
+    "exit_on_entry_ema_cross": True,  # entry candle closes on the wrong side of the EMA, by any distance -> exit at next open
+    "exit_on_entry_hist_fade": True,  # entry candle closes with a weaker histogram than the signal bar -> exit at next open
+    "setup_max_range_pips": 12.0,     # every setup candle (first signal bar .. signal bar) high-low <= N pips; 0 = off
+    "setup_in_session": True,         # every setup candle must lie inside an ADX-confirmed session, not only the entry
     # ---- MACD
     "macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
     "hook_min": 2, "hook_max": 5,
-    "zero_mode": "against",           # against: 0-bars near a flip never count as the new colour | literal: opposite of painted colour | raw | zero_is_red
+    "zero_mode": "literal",           # literal: a 0-bar next to a flip counts as the opposite of its painted colour | against: never the new colour | raw | zero_is_red
     "zero_eps_ticks": 0.5,            # |hist| below this many ticks displays as 0 on TradingView
     "hook_confirm": True,             # bar after the hook bar must continue (checked at +delay)
     "hook_confirm_mode": "snapshot",  # snapshot (at +delay sec) | close
     "macd_window_bars": 3,            # EMA/ST must complete within the hook bar + (N-1)
     "macd_after_span_max": 2,         # hook may come at most N bars after the EMA/ST span
+    "macd_after_st_max": 1,           # if the Supertrend flips first, the MACD must flip within N bars of it
+    "reject_flat_hook": True,         # last two hook bars show the same value (display precision) -> no flip
     "require_monotonic": True,        # every bar from the hook to the signal bar must be stronger than the one before
     "entry_still_check": True,        # at entry (+delay) the histogram must still be rising/falling
     # ---- entry / exits
@@ -68,6 +76,8 @@ DEFAULTS: dict = {
     "rr": 1.6,
     "min_sl_pips": 0.0, "max_sl_pips": 0.0,
     "close_at_session_end": False,
+    "close_at_day_end": True, "day_close_hour": 22,  # every open trade closes at this hour (in tz)
+    "close_on_red_session": True,     # London trade still open at the US check and the US session is red: close at that check
     "close_before_weekend": False, "weekend_close_hour": 23,  # Friday, in tz
     "intrabar_tie": "pessimistic",    # when SL & TP hit inside one bar without finer data
     "subminute_model": "interp",      # without S5 data: interp | open | close of the 1m bar
@@ -91,6 +101,10 @@ REASONS = {
     "news": "Entry inside news blackout",
     "news_setup": "Setup bar inside news window",
     "gap": "No regular next bar (data gap / weekend)",
+    "setup_session": "Part of the setup formed outside an ADX-confirmed session",
+    "hook_invalid": "MACD flip is not a valid hook",
+    "macd_late": "MACD flipped too late after the Supertrend",
+    "setup_range": "A setup candle is larger than the max range (wick to wick)",
     "side": "Histogram crossed back before entry",
     "monotonic": "Momentum faded between hook and signal bar (a light bar)",
     "st_state": "Supertrend flipped back before entry",
@@ -158,6 +172,8 @@ class Prepared:
 def _sig_cols(df: pd.DataFrame, basis: str, has_ask: bool) -> np.ndarray:
     b = df[["bo", "bh", "bl", "bc"]].to_numpy(float)
     if basis == "mid" and has_ask:
+        if "mo" in df.columns:
+            return df[["mo", "mh", "ml", "mc"]].to_numpy(float)   # OANDA's own mid candle, as TradingView plots it
         a = df[["ao", "ah", "al", "ac"]].to_numpy(float)
         return (a + b) / 2
     return b
@@ -178,8 +194,12 @@ def prepare(pd_: PairData, P: dict) -> Prepared:
     t1 = bid1 = ask1 = None
     if pd_.m1 is not None and len(pd_.m1):
         t1 = (pd_.m1.index.asi8 // 10**9).astype(np.int64)
-        bid1 = pd_.m1[["bo", "bh", "bl", "bc"]].to_numpy(float)
-        ask1 = pd_.m1[["ao", "ah", "al", "ac"]].to_numpy(float) if has_ask and "ao" in pd_.m1.columns else None
+        if list(pd_.m1.columns) == ["bo", "bh", "bl", "bc", "ao", "ah", "al", "ac"]:
+            both = pd_.m1.to_numpy(float)    # full-history M1 is large: views, not copies
+            bid1, ask1 = both[:, :4], both[:, 4:8] if has_ask else None
+        else:
+            bid1 = pd_.m1[["bo", "bh", "bl", "bc"]].to_numpy(float)
+            ask1 = pd_.m1[["ao", "ah", "al", "ac"]].to_numpy(float) if has_ask and "ao" in pd_.m1.columns else None
     return Prepared(
         pair=pd_.pair, pip=pip_size(pd_.pair), tick=tick_size(pd_.pair), has_ask=has_ask,
         spread=float(P.get("spread_pips", {}).get(pd_.pair, 0.0)) * pip_size(pd_.pair),
@@ -226,41 +246,51 @@ def effective_colors(hist: np.ndarray, eps: float, mode: str):
     return eff, adj
 
 
-def find_hooks(hist: np.ndarray, eff: np.ndarray, hmin: int, hmax: int):
-    """dict bar -> (direction, receding_count) for every effective colour flip (valid or not)."""
+def find_hooks(hist: np.ndarray, eff: np.ndarray, hmin: int, hmax: int, tick: float = 0.0, flat: bool = False):
+    """dict bar -> (direction, receding_count, valid, why_invalid) for every effective colour flip.
+
+    flat: reject the flip if the last two bars before it show the same value at the chart's display
+    precision (`tick`, e.g. -0.00001 and -0.00001): the hook has no real curve.
+    """
     out = {}
-    n = len(hist)
-    for f in range(2, n):
-        if math.isnan(hist[f]) or math.isnan(hist[f - 1]):
+    h = hist.tolist()
+    green = eff.tolist()
+    for f in (np.flatnonzero(eff[2:] != eff[1:-1]) + 2).tolist():
+        if h[f] != h[f] or h[f - 1] != h[f - 1]:
             continue
-        if eff[f] and not eff[f - 1]:
-            d = 1
-        elif (not eff[f]) and eff[f - 1]:
-            d = -1
-        else:
-            continue
+        d = 1 if green[f] else -1
         k = 0
         j = f - 1
-        while j >= 1 and not math.isnan(hist[j - 1]):
-            if d == 1 and (not eff[j]) and hist[j] > hist[j - 1]:
+        while j >= 1 and h[j - 1] == h[j - 1]:
+            if d == 1 and (not green[j]) and h[j] > h[j - 1]:
                 k += 1
-            elif d == -1 and eff[j] and hist[j] < hist[j - 1]:
+            elif d == -1 and green[j] and h[j] < h[j - 1]:
                 k += 1
             else:
                 break
             j -= 1
-        momentum = (hist[f] > hist[f - 1]) if d == 1 else (hist[f] < hist[f - 1])
-        out[f] = (d, k, bool(momentum and hmin <= k <= hmax))
+        momentum = (h[f] > h[f - 1]) if d == 1 else (h[f] < h[f - 1])
+        why = []
+        if not momentum:
+            why.append("flip bar not stronger")
+        if k < hmin or k > hmax:
+            why.append(f"{k} receding bars (need {hmin}-{hmax})")
+        if flat and tick > 0 and f >= 3 and h[f - 2] == h[f - 2]:
+            shown = lambda v: math.floor(v / tick + 0.5)  # noqa: E731  value as TradingView displays it
+            if shown(h[f - 1]) == shown(h[f - 2]):
+                why.append("last two hook bars show the same value")
+        out[f] = (d, k, not why, ", ".join(why))
     return out
 
 
 def find_bos(pp: Prepared, P: dict):
     """dict bar -> (direction, pierce_pips, range_pips, valid, why_invalid)
 
-    cross_candle (default): the BOS candle is the candle whose close crosses the EMA line
-        (previous close on/below the EMA, this close above it - mirrored for sells). Only that candle
-        is measured: its BODY top (bottom for sells) must be >= buffer beyond the EMA. If it fails,
-        later candles do not rescue the break.
+    cross_candle (default): the BOS candle is the candle whose close crosses the EMA line. A close
+        within `ema_on_line_ticks` of the EMA sits on the line and stays on the side it came from, so it
+        neither crosses nor sets up a new cross. Only the crossing candle is measured: its BODY top
+        (bottom for sells) must be >= buffer beyond the EMA. If it fails, later candles do not rescue
+        the break.
     indicator: ta.crossover(close, ema + buffer) like indicator 1 - may be a later candle.
     """
     buf = float(P["bos_buffer_pips"])
@@ -270,23 +300,23 @@ def find_bos(pp: Prepared, P: dict):
     body_bot = np.round((pp.ema - np.minimum(pp.o, pp.c)) / pp.pip, 6)
     dist = np.round((pp.c - pp.ema) / pp.pip, 6)
     out = {}
-    for i in range(1, len(pp.c)):
+    if P["bos_mode"] == "indicator":
+        ups = (dist[1:] >= buf) & (dist[:-1] < buf)
+        dns = (dist[1:] <= -buf) & (dist[:-1] > -buf)
+    else:
+        gap = pp.c - pp.ema
+        side = np.where(np.abs(gap) <= float(P["ema_on_line_ticks"]) * pp.tick, 0.0, np.sign(gap))
+        side = side[np.maximum.accumulate(np.where(side != 0, np.arange(len(side)), 0))]
+        ups = (side[:-1] <= 0) & (side[1:] > 0)
+        dns = (side[:-1] >= 0) & (side[1:] < 0)
+    for i in (np.flatnonzero(ups | dns) + 1).tolist():
         if math.isnan(pp.ema[i]) or math.isnan(pp.ema[i - 1]):
             continue
+        d = 1 if ups[i - 1] else -1
         if P["bos_mode"] == "indicator":
-            if dist[i] >= buf and dist[i - 1] < buf:
-                d, pierce = 1, float(dist[i])
-            elif dist[i] <= -buf and dist[i - 1] > -buf:
-                d, pierce = -1, float(-dist[i])
-            else:
-                continue
+            pierce = float(d * dist[i])
         else:
-            if pp.c[i - 1] <= pp.ema[i - 1] and pp.c[i] > pp.ema[i]:
-                d, pierce = 1, float(body_top[i])
-            elif pp.c[i - 1] >= pp.ema[i - 1] and pp.c[i] < pp.ema[i]:
-                d, pierce = -1, float(body_bot[i])
-            else:
-                continue
+            pierce = float(body_top[i] if d == 1 else body_bot[i])
         why = []
         if pierce < buf:
             why.append(f"body only {pierce:.2f}p beyond EMA")
@@ -297,14 +327,10 @@ def find_bos(pp: Prepared, P: dict):
 
 
 def find_st_flips(pp: Prepared):
-    out = {}
     d = pp.sdir
-    for i in range(1, len(d)):
-        if d[i - 1] == 1 and d[i] == -1:
-            out[i] = 1
-        elif d[i - 1] == -1 and d[i] == 1:
-            out[i] = -1
-    return out
+    ups = (d[:-1] == 1) & (d[1:] == -1)
+    dns = (d[:-1] == -1) & (d[1:] == 1)
+    return {i: (1 if ups[i - 1] else -1) for i in (np.flatnonzero(ups | dns) + 1).tolist()}
 
 
 # --------------------------------------------------------------------------------------------- price access
@@ -313,9 +339,10 @@ class PriceAccess:
 
     def __init__(self, pp: Prepared, P: dict, s5cache=None, oanda_client=None):
         self.pp, self.P, self.s5, self.client = pp, P, s5cache, oanda_client
+        self.fill_mid = s5cache is not None and P.get("fill_basis") == "mid"
 
     def s5_rows(self, t0: int, t1: int) -> np.ndarray | None:
-        if self.s5 is None or self.client is None:
+        if self.s5 is None:
             return None
         if not self.s5.has_block(self.pp.pair, t0):
             try:
@@ -350,18 +377,22 @@ class PriceAccess:
             at = rows[rows[:, 0] >= T]
             if len(before):
                 dbid, dask = before[-1, 4], before[-1, 8]
-                hs = sig(before[:, 2], before[:, 6])
-                ls = sig(before[:, 3], before[:, 7])
+                if mid and rows.shape[1] >= 13:          # OANDA's own mid candles, as for the 5m bars
+                    hs, ls, px = before[:, 10], before[:, 11], before[-1, 12]
+                else:
+                    hs, ls, px = sig(before[:, 2], before[:, 6]), sig(before[:, 3], before[:, 7]), sig(dbid, dask)
                 ph, pl = max(o5, float(hs.max())), min(o5, float(ls.min()))
             else:
                 dbid, dask = pp.bid5[k, 0], ask_o5
-                ph = pl = o5
-            px = sig(dbid, dask)
+                px = ph = pl = o5
             ph, pl = max(ph, px), min(pl, px)
             if len(at) and at[0, 0] < T + 5:
                 bid, ask = at[0, 1], at[0, 5]          # next tick after the order is sent
             else:
                 bid, ask = dbid, dask
+            if self.fill_mid and rows.shape[1] >= 13:
+                m = at[0, 9] if len(at) and at[0, 0] < T + 5 else before[-1, 12] if len(before) else o5
+                bid, ask = m - pp.spread / 2, m + pp.spread / 2
             return {"px": px, "ph": ph, "pl": pl, "bid": bid, "ask": ask, "tier": "S5", "lo": px, "hi": px}
         model = self.P["subminute_model"]
         if pp.t1 is not None:
@@ -476,9 +507,10 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
                   be: dict | None = None):
     """Walk the price path after the entry. Longs exit on bid, shorts on ask.
 
-    Finest data first: OANDA S5 for the entry bar and for any 1m bar where SL and TP are both
-    touched; otherwise 1m bars, otherwise 5m bars. Without finer data the bar in which the entry
-    happened is treated pessimistically (SL counts if touched, TP only if the bar closed beyond it).
+    Finest data first: OANDA S5 for the entry bar and for any 1m bar in which a level is touched, the
+    break-even trigger is reached or the deadline falls (S5 rolls up to the 1m bar exactly, so quiet
+    minutes need no S5); otherwise 1m bars, otherwise 5m bars. Without finer data the bar in which the
+    entry happened is treated pessimistically (SL counts if touched, TP only if the bar closed beyond it).
     If adjust_at is given, SL/TP become sl2/tp2 for every bar starting at or after adjust_at
     (used to move the stop once the entry candle has closed).
     be = {"pct": %, "off": price offset}: once the exit-side price has covered pct % of the distance
@@ -498,15 +530,16 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
             L[1] = tp2
             L[0] = tighter(L[0], sl2) if st["be"] else sl2
 
-    def trigger(hi, lo, cl, partial):
+    def be_reached(hi, lo, cl, partial):
         if be is None or st["be"]:
-            return
+            return False
         lvl = entry + d * (be["pct"] / 100.0) * abs(L[1] - entry)
         if d == 1:
-            reached = (cl if partial else hi) >= lvl
-        else:
-            reached = (cl if partial else lo) <= lvl
-        if reached:
+            return (cl if partial else hi) >= lvl
+        return (cl if partial else lo) <= lvl
+
+    def trigger(hi, lo, cl, partial):
+        if be_reached(hi, lo, cl, partial):
             st["be"] = True
             L[0] = tighter(L[0], entry + d * be["off"])
 
@@ -514,6 +547,7 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
         return "be" if st["be"] else "sl"
     pp = pa.pp
     side = 0 if d == 1 else 1
+    half = pp.spread / 2
     ex = {"worst": 0.0, "best": 0.0}
     tiers: set = set()
 
@@ -551,7 +585,10 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
             t = int(r[0])
             if t < t_min:
                 continue
-            ohlc = r[1:5] if side == 0 else r[5:9]
+            if pa.fill_mid and len(r) >= 13:
+                ohlc = r[9:13] - half if side == 0 else r[9:13] + half
+            else:
+                ohlc = r[1:5] if side == 0 else r[5:9]
             at(t)
             if deadline is not None and t >= deadline:
                 return t, ohlc[0], deadline_reason
@@ -569,7 +606,7 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
         deadline = T
     bar0 = int(pp.t5[k_entry])
     scan_from = bar0
-    if pa.client is not None:
+    if pa.s5 is not None:
         rows = pa.s5_rows(bar0, bar0 + 300)
         if rows is not None and len(rows):
             tiers.add("S5")
@@ -580,32 +617,38 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
     for tb, rs, b, a in _bars_after(pp, scan_from):
         if tb < scan_from or tb + rs <= T:
             continue
-        ohlc = b if side == 0 else a
+        # mid fills: the 1m bid low and ask high contain the mid range, so a touch here sends the minute to S5
+        ohlc = (b[0], max(b[1], a[1]), min(b[2], a[2]), b[3]) if pa.fill_mid else (b if side == 0 else a)
         at(tb)
         if deadline is not None and tb >= deadline:
+            if pa.fill_mid:
+                rows = pa.s5_rows(tb, tb + rs)
+                if rows is not None and len(rows):
+                    return (*walk_s5(rows, tb), ex["worst"], ex["best"], tiers)
             return tb, ohlc[0], deadline_reason, ex["worst"], ex["best"], tiers
         partial = tb < T
         tiers.add("1m" if rs == 60 else "5m")
-        if deadline is not None and tb < deadline < tb + rs:
-            res = check(*ohlc, partial=True)
+        inside = deadline is not None and tb < deadline < tb + rs
+        res = check(*ohlc, partial=inside or partial)
+        if pa.s5 is not None and rs == 60 and not partial and (inside or res is not None or be_reached(*ohlc[1:4], False)):
+            rows = pa.s5_rows(tb, tb + rs)
+            if rows is not None and len(rows):
+                tiers.add("S5")
+                r = walk_s5(rows, tb)
+                if r:
+                    return (*r, ex["worst"], ex["best"], tiers)
+                continue
+        if inside:
             exc(ohlc[1], ohlc[2])
             if res is not None and res[1] in ("sl", "be", "tie"):
                 return max(tb, T), L[0], why_sl(), ex["worst"], ex["best"], tiers
             frac = (deadline - tb) / rs
             return deadline, ohlc[0] + (ohlc[3] - ohlc[0]) * frac, deadline_reason, ex["worst"], ex["best"], tiers
-        res = check(*ohlc, partial=partial)
         if res is None:
             exc(ohlc[1], ohlc[2])
             trigger(ohlc[1], ohlc[2], ohlc[3], partial)
             continue
         if res[1] == "tie":
-            if pa.client is not None and rs == 60 and not partial:
-                rows = pa.s5_rows(tb, tb + rs)
-                if rows is not None and len(rows):
-                    r = walk_s5(rows, tb)
-                    if r:
-                        tiers.add("S5")
-                        return (*r, ex["worst"], ex["best"], tiers)
             exc(ohlc[1], ohlc[2])
             tiers.add("tie-" + tie)
             px, why = (L[0], why_sl()) if tie == "pessimistic" else (L[1], "tp")
@@ -619,6 +662,7 @@ def simulate_exit(pa: PriceAccess, d: int, k_entry: int, T: int, entry: float, s
 
 
 # --------------------------------------------------------------------------------------------- sessions & news
+@functools.lru_cache(maxsize=None)
 def _local_ts(date: np.datetime64, hour: int, tz: str) -> int:
     ts = pd.Timestamp(date) + pd.Timedelta(hours=hour)
     return int(ts.tz_localize(tz, ambiguous=False, nonexistent="shift_forward").timestamp())
@@ -675,15 +719,18 @@ def news_times(events: pd.DataFrame, pair: str, P: dict) -> tuple[np.ndarray, li
 def build_events(pp: Prepared, P: dict):
     eps = float(P["zero_eps_ticks"]) * pp.tick
     eff, adj = effective_colors(pp.hist, eps, P["zero_mode"])
-    hooks = find_hooks(pp.hist, eff, int(P["hook_min"]), int(P["hook_max"]))
+    hooks = find_hooks(pp.hist, eff, int(P["hook_min"]), int(P["hook_max"]), pp.tick, bool(P["reject_flat_hook"]))
     bos = find_bos(pp, P)
     flips = find_st_flips(pp)
     return eff, adj, hooks, bos, flips
 
 
-def build_candidates(pp: Prepared, P: dict, hooks, bos, flips):
+def build_candidates(pp: Prepared, P: dict, hooks, bos, flips, near: list | None = None):
+    """Setups where all three line up. `near` (optional) collects setups that only failed on the
+    MACD side (invalid hook, or MACD flipped too late after the Supertrend), for the audit."""
     before, after = int(P["bos_before_st_max"]), int(P["bos_after_st_max"])
     win, aft = int(P["macd_window_bars"]), int(P["macd_after_span_max"])
+    after_st = int(P["macd_after_st_max"])
     cands = {}
     for S, d in flips.items():
         for B in range(S - before, S + after + 1):
@@ -693,7 +740,16 @@ def build_candidates(pp: Prepared, P: dict, hooks, bos, flips):
             E = max(S, B)
             for H in range(E - (win - 1), E + aft + 1):
                 hk = hooks.get(H)
-                if not hk or hk[0] != d or not hk[2]:
+                if not hk or hk[0] != d:
+                    continue
+                if not hk[2]:
+                    if near is not None and max(H, E) + 1 < len(pp.t5):
+                        near.append({"d": d, "C": max(H, E), "S": S, "B": B, "H": H, "code": "hook_invalid", "why": hk[3]})
+                    continue
+                if H > S and H - S > after_st:   # Supertrend flipped first: MACD must follow within N bars
+                    if near is not None and max(H, E) + 1 < len(pp.t5):
+                        near.append({"d": d, "C": max(H, E), "S": S, "B": B, "H": H, "code": "macd_late",
+                                     "why": f"MACD flipped {H - S} bars after the Supertrend (max {after_st})"})
                     continue
                 C = max(H, E)
                 if C + 1 >= len(pp.t5):
@@ -715,11 +771,12 @@ def pine_indicator_signals(pp: Prepared, P: dict, tab: dict, ntimes: np.ndarray)
     bsu = bsd = 999
     i1 = []
     nb, na = int(P["news_before_min"]) * 60, int(P["news_after_min"]) * 60
+    up_l, dn_l, sd = up.tolist(), dn.tolist(), pp.sdir.tolist()
     for i in range(1, n):
-        bsu = 0 if up[i] else bsu + 1
-        bsd = 0 if dn[i] else bsd + 1
-        ch = pp.sdir[i] - pp.sdir[i - 1]
-        if math.isnan(ch) or ch == 0:
+        bsu = 0 if up_l[i] else bsu + 1
+        bsd = 0 if dn_l[i] else bsd + 1
+        ch = sd[i] - sd[i - 1]
+        if ch != ch or ch == 0:
             continue
         t = int(pp.t5[i])
         j = np.searchsorted(ntimes, t - na)
@@ -730,7 +787,7 @@ def pine_indicator_signals(pp: Prepared, P: dict, tab: dict, ntimes: np.ndarray)
         if ch > 0 and bsd <= 2 and not danger and london_ok:
             i1.append((i, -1))
     # indicator 2
-    hist = pp.hist
+    hist = pp.hist.tolist()
     decay = growth = 0
     saved_d = saved_g = 0
     prev_decay = prev_growth = 0

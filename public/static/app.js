@@ -13,17 +13,19 @@ const COUNTRIES = ["US", "EU", "CH", "AU", "JP", "GB", "CA", "NZ", "DE", "FR", "
 
 const GROUPS = [
   { title: "Instruments & data", fields: [
-    { key: "source", label: "Data source", type: "select", options: [["tradingview", "TradingView (OANDA:… symbols)"], ["oanda", "OANDA v20 API (needs token)"]],
+    { key: "source", label: "Data source", type: "select", options: [["oanda", "OANDA v20 (full history on this computer)"], ["tradingview", "TradingView (OANDA:… symbols, recent weeks only)"]],
       help: "TradingView anonymous history is short (5m ≈ 4 weeks, 1m ≈ 1 week). OANDA gives years of 1m bid/ask + 5s candles." },
     { key: "pairs", label: "Pairs", type: "pairs" },
-    { key: "price_basis", label: "Signal price", type: "select", options: [["bid", "Bid (what TradingView plots)"], ["mid", "Mid (OANDA only)"]] },
+    { key: "price_basis", label: "Signal price", type: "select", options: [["mid", "Mid (what TradingView plots, OANDA source only)"], ["bid", "Bid"]] },
     { key: "initial_balance", label: "Initial balance (USD)", type: "number", step: 100 },
     { key: "lots", label: "Lots per trade (1 lot = 100k units)", type: "number", step: 0.01 },
     { key: "max_open_total", label: "Max open positions across pairs", type: "number", step: 1, help: "One position per pair is always enforced." },
   ]},
   { title: "Costs", fields: [
-    { key: "spread_pips", label: "Fixed spread in pips (0 = zero spread)", type: "spreads" },
-    { key: "commission_per_lot", label: "Commission USD per lot, round turn", type: "number", step: 0.5 },
+    { key: "spread_pips", label: "Fixed spread in pips (TradingView data, or OANDA with mid fills)", type: "spreads" },
+    { key: "commission_per_lot", label: "Commission USD per lot, round turn (default 5)", type: "number", step: 0.5 },
+    { key: "fill_basis", label: "Fills", type: "select", options: [["mid", "Chart price, bid = ask as on MT5 (+ fixed spread above)"], ["bid_ask", "Real OANDA bid/ask"]],
+      help: "Chart price fills at the price on the candles, plus the fixed spread above (0 = no spread). Real bid/ask pays OANDA's own spread. OANDA only." },
   ]},
   { title: "Sessions & ADX (1H)", fields: [
     { key: "tz", label: "Timezone for session hours and all displayed times", type: "select", options: [["Europe/Sofia", "Bulgaria (BGN, Europe/Sofia)"], ["Europe/London", "London"], ["America/New_York", "New York"]],
@@ -55,10 +57,13 @@ const GROUPS = [
     { key: "st_atr", label: "Supertrend ATR", type: "number", step: 1, half: true },
     { key: "st_factor", label: "Supertrend factor", type: "number", step: 0.1, half: true },
     { key: "bos_max_range_pips", label: "BOS candle max range, wick to wick (pips)", type: "number", step: 0.5 },
+    { key: "ema_on_line_ticks", label: "Close within N ticks of the EMA = on the line, not a cross", type: "number", step: 0.05, help: "1 tick = 0.1 pip. A close this close to the EMA neither crosses it nor sets up a new cross, for the BOS and for the EMA exit." },
     { key: "bos_mode", label: "BOS definition", type: "select", options: [["cross_candle", "Only the candle that closes across the EMA; its body must clear EMA by the buffer"], ["indicator", "Close crosses EMA±buffer, may be a later candle (indicator 1)"]] },
     { key: "bos_after_st_max", label: "BOS up to N bars AFTER ST flip", type: "number", step: 1, half: true },
     { key: "bos_before_st_max", label: "BOS up to N bars BEFORE ST flip", type: "number", step: 1, half: true, help: "Your rule: same or next candle → after=1, before=0. Indicator 1 uses before=2, after=0." },
-    { key: "exit_on_entry_ema_cross", label: "Exit immediately if entry candle closes back across EMA", type: "check" },
+    { key: "exit_on_entry_ema_cross", label: "Exit at next open if the entry candle closes on the wrong side of the EMA (any distance)", type: "check" },
+    { key: "setup_max_range_pips", label: "Every setup candle max range, wick to wick (pips, 0 = off)", type: "number", step: 0.5, help: "All candles from the first signal (hook / ST flip / BOS) to the signal bar." },
+    { key: "setup_in_session", label: "Whole setup must form inside an ADX-confirmed session (not only the entry)", type: "check" },
   ]},
   { title: "MACD hook (5m)", fields: [
     { key: "macd_fast", label: "Fast", type: "number", step: 1, third: true },
@@ -66,14 +71,17 @@ const GROUPS = [
     { key: "macd_signal", label: "Signal", type: "number", step: 1, third: true },
     { key: "hook_min", label: "Min receding bars", type: "number", step: 1, half: true },
     { key: "hook_max", label: "Max receding bars", type: "number", step: 1, half: true },
-    { key: "zero_mode", label: "Bars that display 0", type: "select", options: [["against", "Next to a flip → never counts as the new colour (flip needs a real bar)"], ["literal", "Next to a flip → opposite of the colour TradingView paints"], ["raw", "Use TradingView colours as painted"], ["zero_is_red", "Always red"]] },
+    { key: "zero_mode", label: "Bars that display 0", type: "select", options: [["literal", "Next to a flip → opposite of the colour TradingView paints"], ["zero_is_red", "A bar showing 0.00000 / 0.000 always counts as red"], ["against", "Next to a flip → never counts as the new colour"], ["raw", "Use TradingView colours as painted"]] },
+    { key: "reject_flat_hook", label: "Reject the flip if the last two hook bars show the same value", type: "check" },
     { key: "zero_eps_ticks", label: "‘Displays as 0’ threshold (ticks)", type: "number", step: 0.1, help: "0.5 = the value rounds to 0 at the chart's precision: JPY pairs |v| < 0.0005 → 0.000 (0.0005+ shows 0.001 = valid bar); other pairs |v| < 0.000005 → 0.00000." },
     { key: "hook_confirm", label: "Bar after the hook must continue (2-bar rule)", type: "check" },
     { key: "hook_confirm_mode", label: "2-bar rule measured", type: "select", options: [["snapshot", "At +entry-delay seconds into that bar"], ["close", "At that bar's close"]] },
     { key: "macd_window_bars", label: "MACD first: others within N bars (incl. hook bar)", type: "number", step: 1 },
     { key: "macd_after_span_max", label: "EMA/ST first: hook within N bars after span", type: "number", step: 1 },
+    { key: "macd_after_st_max", label: "Supertrend flips first: MACD must flip within N bars", type: "number", step: 1 },
     { key: "require_monotonic", label: "No fading bar between hook and signal bar (every bar stronger than the one before)", type: "check" },
     { key: "entry_still_check", label: "Entry bar (+30s) histogram must exceed the previous bar AND the hook bar", type: "check" },
+    { key: "exit_on_entry_hist_fade", label: "Entry candle closes with weaker histogram than signal bar → exit at next candle open", type: "check" },
     { key: "momentum_no5s", label: "+30s MACD checks without 5-second data", type: "select", options: [
         ["range_accept", "Decide from the 1m/5m price range; undecidable → accept (no look-ahead)"],
         ["range_reject", "Decide from the price range; undecidable → reject (strict, flatters results)"],
@@ -88,6 +96,8 @@ const GROUPS = [
     { key: "rr", label: "Take profit = SL distance ×", type: "number", step: 0.1 },
     { key: "min_sl_pips", label: "Min SL (pips, 0 = off)", type: "number", step: 0.5, half: true },
     { key: "max_sl_pips", label: "Max SL (pips, 0 = off)", type: "number", step: 0.5, half: true },
+    { key: "close_at_day_end", label: "Close all open trades at the end of the day", type: "check" },
+    { key: "day_close_hour", label: "End-of-day close hour (session tz)", type: "number", step: 1 },
     { key: "close_at_session_end", label: "Close open trades at session end", type: "check" },
     { key: "close_before_weekend", label: "Close open trades before the weekend", type: "check" },
     { key: "weekend_close_hour", label: "Friday close hour (session tz)", type: "number", step: 1 },
@@ -184,8 +194,8 @@ function setDateBounds() {
 function saveParams() { LS.set("momo.params", state.params); }
 function updateBadge() {
   const s = state.params.source;
-  const ok = s === "tradingview" || state.cfg.sources.oanda;
-  $("#srcBadge").textContent = s === "oanda" ? `OANDA ${state.cfg.oanda_env}${ok ? "" : " — no token!"}` : `TradingView${state.cfg.tv_login ? " (logged in)" : " (anonymous)"}`;
+  const ok = s !== "oanda" || state.cfg.sources.oanda;
+  $("#srcBadge").textContent = s === "oanda" ? `OANDA ${state.cfg.oanda_env}${ok ? "" : " — no token!"}` : s === "forexsb" ? "Dukascopy (forexsb)" : `TradingView${state.cfg.tv_login ? " (logged in)" : " (anonymous)"}`;
   $("#srcBadge").style.color = ok ? "" : "var(--bad)";
 }
 
@@ -206,6 +216,8 @@ function setPeriods(a, b, split) {
 }
 function quickPeriod(q) {
   const today = new Date();
+  if (q === "oandanews") { setPeriods(new Date("2008-02-01T00:00:00Z"), today, 0.7); return; }
+  if (q === "oandafull") { setPeriods(new Date("2005-02-15T00:00:00Z"), today, 0.7); return; }
   if (q === "tvmax") {
     const fourWeeksAgo = new Date(today.getTime() - 28 * 86400000);
     $("#isStart").value = isoDate(fourWeeksAgo);
@@ -240,7 +252,7 @@ function busy(on, msg) { $("#busy").hidden = !on; if (msg) $("#busyMsg").textCon
 async function runBacktest() {
   const periods = periodsFromUI();
   for (const p of periods) if (!p.start || !p.end) return alert("Set all period dates.");
-  busy(true, state.params.source === "oanda" ? "Loading OANDA data (first run of a period downloads 1m history — can take a few minutes)…" : "Loading TradingView data & running…");
+  busy(true, state.params.source === "oanda" ? "Loading OANDA data (first run of a period downloads 1m history — can take a few minutes)…" : state.params.source === "forexsb" ? "Loading Dukascopy data & running (long periods: the first run also downloads the news calendar)…" : "Loading TradingView data & running…");
   try {
     const data = await api("/api/backtest", { params: state.params, periods, refresh: $("#refresh").checked });
     $("#refresh").checked = false;
@@ -459,6 +471,14 @@ function tradeCardHtml(t, idx) {
           <span>${num(t.sl_pips, 1)} p</span>
         </div>
         <div class="tc-item">
+          <label>Exit price</label>
+          <span>${t.exit}</span>
+        </div>
+        <div class="tc-item">
+          <label>Spread paid</label>
+          <span>${num(t.spread_pips, 1)} p</span>
+        </div>
+        <div class="tc-item">
           <label>Stop Loss (SL)</label>
           <span>${t.sl}</span>
         </div>
@@ -468,7 +488,7 @@ function tradeCardHtml(t, idx) {
         </div>
         <div class="tc-item full">
           <label>Reason</label>
-          <span><span class="tag ${t.exit_reason}">${t.exit_reason.toUpperCase()}</span></span>
+          <span><span class="tag ${t.exit_reason}">${t.exit_reason.toUpperCase()}</span>${t.exit_note ? ` <span class="hint">${esc(t.exit_note)}</span>` : ""}</span>
         </div>
         <div class="tc-item highlight">
           <label>Pips</label>
@@ -480,7 +500,23 @@ function tradeCardHtml(t, idx) {
         </div>
       </div>
     </div>
+    ${setupTable(t)}
   </div>`;
+}
+
+function setupTable(t) {
+  const P = state.data ? state.data.params : state.params;
+  const maxr = P.setup_max_range_pips || P.bos_max_range_pips, buf = P.bos_buffer_pips;
+  const rows = (t.setup_candles || []).map(c => {
+    const isBos = c.roles.includes("BOS");
+    return `<tr><td>${fmtT(c.t).slice(11)}</td><td class="l">${esc(c.roles)}</td>
+      <td class="${maxr && c.range_pips > maxr ? "neg" : ""}">${num(c.range_pips, 1)}</td>
+      <td class="${isBos ? (c.body_beyond_ema_pips >= buf ? "pos" : "neg") : "hint"}">${c.body_beyond_ema_pips > 0 ? "+" : ""}${num(c.body_beyond_ema_pips, 2)}</td>
+      <td>${esc(c.hist_shown)}</td><td class="l">${esc(c.tv_colour)}${c.counted_as !== (c.tv_colour.includes("green") ? "green" : "red") ? ` → <b>${c.counted_as}</b>` : ""}</td></tr>`;
+  }).join("");
+  return rows ? `<div class="tc-setup"><label>Setup candles (${tzName()})</label>
+    <table><thead><tr><th>Bar</th><th class="l">Role</th><th>Range p</th><th>Body vs EMA p</th><th>Hist</th><th class="l">Colour</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="hint">Range = high–low (max ${maxr}). Body vs EMA = distance from the EMA line to the body edge in the trade direction (BOS needs ≥ ${buf}).</div></div>` : "";
 }
 
 function renderTrades() {
@@ -654,11 +690,22 @@ function plotChart(c, pair, trade, el, opt = {}) {
   }
 
   if (show.has("trade")) {
-    const list = opt.onlyTrade && trade ? [trade] : [].concat(...runs().map(r => r.result.trades.filter(x => x.pair === pair)));
+    const list = opt.trades ? opt.trades.filter(x => x.pair === pair) : opt.onlyTrade && trade ? [trade] : [].concat(...runs().map(r => r.result.trades.filter(x => x.pair === pair)));
     list.forEach(x => {
       const te = Math.floor(x.entry_ts / 300) * 300, tx = Math.floor(x.exit_ts / 300) * 300;
       if (te >= c.t[0] && te <= c.t[c.t.length - 1]) marks.push({ time: te, position: x.dir === "BUY" ? "belowBar" : "aboveBar", color: "#fff", shape: x.dir === "BUY" ? "arrowUp" : "arrowDown", text: `${x.dir} ${x.entry}` });
-      if (tx >= c.t[0] && tx <= c.t[c.t.length - 1]) marks.push({ time: tx, position: "aboveBar", color: x.pnl >= 0 ? "#26a69a" : "#ef5350", shape: "circle", text: `${x.exit_reason.toUpperCase()} ${money(x.pnl)}` });
+      if (tx >= c.t[0] && tx <= c.t[c.t.length - 1]) marks.push({ time: tx, position: "aboveBar", color: x.pnl >= 0 ? "#26a69a" : "#ef5350", shape: "square", size: 0.4, text: `${x.exit_reason.toUpperCase()} ${money(x.pnl)}` });
+    });
+  }
+  if (trade && trade.setup_candles) {
+    const P = state.data ? state.data.params : state.params;
+    const maxr = P.setup_max_range_pips || P.bos_max_range_pips;
+    trade.setup_candles.forEach(sc => {
+      const t = Math.floor(new Date(sc.t).getTime() / 1000);
+      if (!c.t.includes(t)) return;
+      const bos = sc.roles.includes("BOS") ? ` EMA${sc.body_beyond_ema_pips > 0 ? "+" : ""}${sc.body_beyond_ema_pips.toFixed(1)}` : "";
+      marks.push({ time: t, position: trade.dir === "BUY" ? "aboveBar" : "belowBar", color: maxr && sc.range_pips > maxr ? "#ef5350" : "#b0b7c3",
+                   shape: "square", size: 0.4, text: `${sc.range_pips.toFixed(1)}p${bos}` });
     });
   }
   marks.sort((a, b) => a.time - b.time);
@@ -668,6 +715,12 @@ function plotChart(c, pair, trade, el, opt = {}) {
     candles.createPriceLine({ price: trade.entry, color: "#ffffff", lineWidth: 1, lineStyle: 2, title: "Entry" });
     candles.createPriceLine({ price: trade.sl, color: "#ef5350", lineWidth: 1, lineStyle: 0, title: "SL" });
     candles.createPriceLine({ price: trade.tp, color: "#26a69a", lineWidth: 1, lineStyle: 0, title: "TP" });
+    const exitColor = trade.pnl >= 0 ? "#26a69a" : "#ef5350", tExit = Math.floor(trade.exit_ts / 300) * 300;
+    candles.createPriceLine({ price: trade.exit, color: exitColor, lineWidth: 1, lineStyle: 1, title: "Exit" });
+    if (c.t.includes(tExit)) {   // the dot sits on the real exit price; the marker text above the bar is only a label
+      px.addLineSeries({ color: exitColor, lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 4, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, priceFormat: fmt })
+        .setData([{ time: tExit, value: trade.exit }]);
+    }
   }
 
   const hs = mc.addHistogramSeries({ priceFormat: { type: "price", precision: c.digits, minMove: Math.pow(10, -c.digits) }, priceLineVisible: false });
@@ -700,7 +753,10 @@ function plotChart(c, pair, trade, el, opt = {}) {
     link(mc, px, candles, i => c.c[i]);
   }
 
-  if (opt.fit) {
+  if (opt.fromTo) {
+    const i0 = c.t.findIndex(t => t >= opt.fromTo[0]), i1 = c.t.findIndex(t => t >= opt.fromTo[1]);
+    px.timeScale().setVisibleLogicalRange({ from: Math.max(i0, 0), to: i1 < 0 ? c.t.length : i1 });
+  } else if (opt.fit) {
     px.timeScale().fitContent();
   } else {
     const mid = Math.floor(c.t.length / 2);
@@ -742,7 +798,9 @@ function renderRejections() {
   const f = r.result.funnel;
   const rows = [{ k: "Setups where EMA-BOS + ST flip + valid MACD hook lined up", v: f.candidates }]
     .concat(f.rejections.map(x => ({ k: "− " + x.reason, v: x.count }))).concat([{ k: "= Trades entered", v: f.entered }]);
+  const nm = (f.near_misses || []).map(x => ({ k: x.reason, v: x.count }));
   $("#funnel").innerHTML = tableFrom(rows, [["Step", "k"], ["Count", "v"]]) +
+    (nm.length ? `<div class="card-h" style="margin-top:10px">Near-misses inside a confirmed session (EMA BOS + ST flip lined up, MACD side failed)</div>` + tableFrom(nm, [["Why", "k"], ["Count", "v"]]) : "") +
     `<p class="hint">Rejections are counted at the first failing check, in this order: data gap → ADX session → news → histogram stayed on side → Supertrend still in direction → pair busy → max positions → 2-bar (30s) MACD rule → still rising at entry → live Supertrend → SL sanity.</p>`;
   const es = Object.entries(r.result.event_stats).map(([p, s]) => ({ pair: p, ...s, ...r.result.indicator_signals[p] }));
   $("#evStats").innerHTML = tableFrom(es, [["Pair", "pair"], ["5m bars", "bars_5m"], ["ST flips", "st_flips"], ["EMA crosses", "bos_total"], ["Valid BOS", "bos_valid"], ["Body < buffer", "bos_buffer_rejected"], ["Range too big", "bos_range_rejected"],
@@ -767,7 +825,7 @@ function renderRejections() {
   const shown = list.slice(0, 1500);
   $("#rjWrap").innerHTML = tableFrom(shown, [["Pair", "pair"], ["Dir", "dir"], ["ST flip", "st_bar", v => fmtT(v)], ["BOS", "bos_bar", v => fmtT(v)], ["Hook", "hook_bar", v => fmtT(v)],
     ["Signal bar", "signal_bar", v => fmtT(v)], ["Would enter", "entry_time", v => fmtT(v, true)], ["Reason", "reason", null, "l"],
-    ["Detail", "code", (v, x) => esc(x.news || (x.adx != null ? `ADX ${x.adx}` : x.session ? `${x.session} not confirmed` : "") || (x.hist_next != null ? `next ${x.hist_next.toExponential(2)} vs hook ${x.hist_hook.toExponential(2)}` : "") || (x.hist_entry != null ? `entry ${x.hist_entry.toExponential(2)} vs prev ${x.hist_signal.toExponential(2)} / hook ${x.hist_hook.toExponential(2)}` : "") || (x.sl_pips != null ? `${x.sl_pips} pips` : "")), "l"]])
+    ["Detail", "code", (v, x) => esc(x.detail || (x.range_pips != null ? `${x.range_pips} pips candle at ${fmtT(x.bar).slice(11)}` : "") || (x.bar ? `bar ${fmtT(x.bar).slice(11)} outside the session` : "") || x.news || (x.adx != null ? `ADX ${x.adx}` : x.session ? `${x.session} not confirmed` : "") || (x.hist_next != null ? `next ${x.hist_next.toExponential(2)} vs hook ${x.hist_hook.toExponential(2)}` : "") || (x.hist_entry != null ? `entry ${x.hist_entry.toExponential(2)} vs prev ${x.hist_signal.toExponential(2)} / hook ${x.hist_hook.toExponential(2)}` : "") || (x.sl_pips != null ? `${x.sl_pips} pips` : "")), "l"]])
     + (list.length > shown.length ? `<div class="hint">Showing 1500 of ${list.length}.</div>` : "");
   $$("#rjWrap tbody tr").forEach((tr, i) => tr.onclick = () => openChart(shown[i].pair, shown[i].signal_bar));
 }
@@ -808,7 +866,10 @@ function renderRules() {
 <li><b>SL</b> = ${P.sl_mode === "avg_close" ? "the middle (average) of the Supertrend value of the signal candle and of the entry candle, as drawn on the chart — if the line is flat, the SL is on the line. The entry candle's value is only final when it closes, so during the entry candle the SL sits on the signal candle's Supertrend, then moves to the average" : P.sl_mode === "avg_live" ? "average of the Supertrend value of the signal candle and the live Supertrend value of the entry candle at the moment of entry" : "Supertrend value of the signal candle"}. <b>TP</b> = entry ± ${P.rr} × the distance from entry to that SL.</li>
 <li>Longs are stopped/targeted on the bid, shorts on the ask. A gap through a level fills at the gap price.</li>
 <li>${P.be_enabled ? `<b>Break-even</b>: once price has covered ${P.be_trigger_pct}% of the distance from entry to TP, the SL moves to entry${P.be_offset_pips ? ` ${P.be_offset_pips > 0 ? "+" : ""}${P.be_offset_pips} pips` : ""}. It applies from the next bar (5s / 1m / 5m), because inside one bar the order of high and low is unknown. With commission, a break-even exit is a small loss.` : "Break-even off."}</li>
-<li>${P.exit_on_entry_ema_cross ? "<b>EMA reversal exit</b>: If the trade enters and the <b>entry candle closes back across the EMA</b> (close ≤ EMA for buys, ≥ EMA for sells), the trade exits immediately on that candle's close." : "EMA reversal exit off."}</li>
+<li>${P.exit_on_entry_hist_fade ? "<b>Momentum exit</b>: if the entry candle closes with a weaker histogram than the signal bar (light green for buys / light red for sells), the trade is closed at the <b>open of the next candle</b>." : "Momentum exit off."}</li>
+<li>${P.setup_in_session ? "<b>Whole setup in session</b>: the hook, Supertrend flip, BOS and signal candle must all be inside an ADX-confirmed session, not only the entry." : "Only the entry has to be inside a session."} ${P.setup_max_range_pips > 0 ? `Every setup candle must be ≤ ${P.setup_max_range_pips} pips high–low.` : ""}</li>
+<li><b>MACD after Supertrend</b>: if the Supertrend flips first, the MACD must flip on the same or within ${P.macd_after_st_max} candle(s), otherwise no setup.${P.reject_flat_hook ? " A flip whose last two hook bars show the same value (e.g. −0.00001, −0.00001) is not a hook." : ""} ${P.zero_mode === "zero_is_red" ? "A bar that shows 0.00000 (0.000 on JPY pairs) always counts as red." : P.zero_mode === "literal" ? "A bar that shows 0.00000 (0.000 on JPY pairs) next to a colour change counts as the opposite of the colour TradingView paints." : ""}</li>
+<li>${P.exit_on_entry_ema_cross ? "<b>EMA reversal exit</b>: If the <b>entry candle closes on the wrong side of the EMA</b>, by any distance (below it for buys, above it for sells), the trade exits at the next candle's open." : "EMA reversal exit off."}</li>
 <li>${P.close_before_news_min > 0 ? `Open trades are closed at market <b>${P.close_before_news_min} min before</b> any relevant news.` : "No pre-news close."} ${P.close_at_session_end ? "Trades are closed at session end." : ""} ${P.close_before_weekend ? `Trades are closed Friday ${P.weekend_close_hour}:00.` : ""}</li>
 </ul>
 <h3>5. News</h3>
@@ -825,11 +886,83 @@ function renderRules() {
 </table>
 <h2>Data & precision</h2>
 <ul>
-<li>Prices: ${P.source === "oanda" ? "OANDA v20 1m bid/ask, 5-second candles for the 30s entry moment and for any 1m bar where SL and TP are both touched." : "TradingView OANDA:… bars (1m where available, else 5m). No ask price → fixed spread from Costs is added. The +30s price is interpolated inside the 1m bar (or 5m bar if no 1m)."}</li>
+<li>Prices: ${P.source === "forexsb" ? "Dukascopy bars from forexsb.com (bid, UTC): 5m and 1m as downloaded, 1H built from 30m bars. A different feed from your TradingView OANDA chart — on 16 Sep–27 Oct 2026, 86% of OANDA trades were reproduced exactly. No ask price → fixed spread from Costs is added." : P.source === "oanda" ? "OANDA v20 1m bid/ask, 5-second candles for the 30s entry moment and for any 1m bar where SL and TP are both touched." : "TradingView OANDA:… bars (1m where available, else 5m). No ask price → fixed spread from Costs is added. The +30s price is interpolated inside the 1m bar (or 5m bar if no 1m)."}</li>
 <li>Indicators are recomputed bar-by-bar with Pine's exact formulas (verified against independent implementations; use <i>Data connections → Verify</i> with a TradingView login to compare with TradingView's own values).</li>
 <li>No look-ahead: all signals use closed candles; the only forming-candle values are the live MACD/Supertrend at the entry second, computed from prices up to that second.</li>
 <li>P&L in USD: JPY/CHF quoted pairs are converted with USDJPY/USDCHF at exit time. No swap/financing is modelled.</li>
 </ul>`;
+}
+
+// ------------------------------------------------------------------ day review: one day, all pairs
+function localToUtc(date, hour) {
+  const guess = new Date(`${date}T${String(hour).padStart(2, "0")}:00:00Z`);
+  const off = new Date(guess.toLocaleString("en-US", { timeZone: TZ })) - new Date(guess.toLocaleString("en-US", { timeZone: "UTC" }));
+  return Math.floor((guess.getTime() - off) / 1000);
+}
+function tradePct(t) { return (t.dir === "BUY" ? 1 : -1) * (t.exit / t.entry - 1) * 100; }
+function pctTxt(v) { return `${v > 0 ? "+" : ""}${v.toFixed(3)}%`; }
+
+// With a local calibration/table_days.json the arrows jump between table days, otherwise between weekdays.
+async function stepDay(dir) {
+  if (!state.tableDays) state.tableDays = await api("/api/table_days");
+  const days = Object.keys(state.tableDays).sort(), now = $("#dayDate").value;
+  let next;
+  if (days.length) next = dir > 0 ? days.find(d => d > now) : days.filter(d => d < now).pop();
+  else if (now) {
+    const d = new Date(now + "T12:00:00Z");
+    do d.setUTCDate(d.getUTCDate() + dir); while ([0, 6].includes(d.getUTCDay()));
+    next = d.toISOString().slice(0, 10);
+  }
+  if (next) { $("#dayDate").value = next; loadDay(); }
+}
+
+async function loadDay() {
+  const date = $("#dayDate").value;
+  if (!date) return;
+  if (!state.tableDays) state.tableDays = await api("/api/table_days");
+  const hasTable = Object.keys(state.tableDays).length > 0;
+  $("#dayPrev").textContent = hasTable ? "◀ Table day" : "◀ Day";
+  $("#dayNext").textContent = hasTable ? "Table day ▶" : "Day ▶";
+  (state.dayCharts || []).forEach(c => c.remove());
+  state.dayCharts = [];
+  const params = state.params, pairs = params.pairs;
+  const box = $("#dayCharts");
+  box.innerHTML = "";
+  busy(true, "Loading the day…");
+  try {
+    const run = await api("/api/backtest", { params, periods: [{ name: "Day", start: date, end: date }] });
+    const res = run.runs[0].result;
+    const dayOf = t => new Date(t * 1000).toLocaleDateString("en-CA", { timeZone: TZ });
+    const trades = res.trades.filter(t => dayOf(t.entry_ts) === date);
+    const left = trades.map(t => ({ t, pct: tradePct(t) }));
+    const chips = (state.tableDays[date] || []).map(f => {
+      const v = f * 100;
+      let best = -1;
+      left.forEach((x, i) => { if (Math.abs(x.pct - v) <= 0.012 && (best < 0 || Math.abs(x.pct - v) < Math.abs(left[best].pct - v))) best = i; });
+      const m = best >= 0 ? left.splice(best, 1)[0].t : null;
+      return `<span class="daychip ${v >= 0 ? "pos" : "neg"}">${pctTxt(v)}${m ? ` <span class="hint">≈ ${m.pair} ${m.dir} ${fmtT(m.entry_time)}</span>` : ""}</span>`;
+    });
+    $("#dayTable").innerHTML = !hasTable ? "" : chips.length ? `<b>Your table:</b> ${chips.join(" ")}` : "<b>Your table:</b> nothing on this day.";
+    $("#dayTrades").innerHTML = trades.length
+      ? "<b>Backtester:</b> " + trades.map(t => `<span class="daychip ${t.pnl >= 0 ? "pos" : "neg"}">${t.pair} ${t.dir} ${fmtT(t.entry_time)} ${t.exit_reason} ${pctTxt(tradePct(t))}</span>`).join(" ")
+      : "<b>Backtester:</b> no trades on this day.";
+    const center = new Date(localToUtc(date, 12) * 1000).toISOString();
+    const charts = await Promise.all(pairs.map(pair => api("/api/chart", { params, pair, center, start: date, end: date, before: 144, after: 144 })));
+    const from = localToUtc(date, 10), to = localToUtc(date, 23);
+    pairs.forEach((pair, n) => {
+      const sets = res.rejected.filter(r => r.pair === pair && dayOf(new Date(r.entry_time).getTime() / 1000) === date);
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML = `<div class="card-h">${pair} · ${date}</div>
+        <div class="pxwrap"><div class="chart-px"></div><div class="legend-ov"></div></div><div class="chart-macd"></div>
+        <div class="hint">${sets.length ? sets.map(r => `${fmtT(r.entry_time)} ${r.dir}: ${esc(r.reason)}${r.detail ? ` (${esc(r.detail)})` : ""}`).join("<br>") : "No rejected setups."}</div>`;
+      box.appendChild(card);
+      if (charts[n].error) { $(".chart-px", card).textContent = charts[n].error; return; }
+      const r = plotChart(charts[n], pair, null, { px: $(".chart-px", card), macd: $(".chart-macd", card), legend: $(".legend-ov", card) },
+                          { show: new Set(["trade", "hook", "bos", "st"]), trades, fromTo: [from, to] });
+      state.dayCharts.push(r.px, r.mc);
+    });
+  } catch (err) { alert(err.message); } finally { busy(false); }
 }
 
 // ------------------------------------------------------------------ tabs, connections, init
@@ -893,6 +1026,20 @@ async function init() {
   LS.set("momo.v5", true);
   if (saved && !LS.get("momo.v6", false)) { delete saved.spread_pips; LS.set("momo.params", saved); }
   LS.set("momo.v6", true);
+  if (saved && !LS.get("momo.v7", false)) { ["zero_mode", "commission_per_lot", "source"].forEach(k => delete saved[k]); LS.set("momo.params", saved); }
+  LS.set("momo.v7", true);
+  if (saved && !LS.get("momo.v8", false)) { delete saved.price_basis; LS.set("momo.params", saved); }
+  LS.set("momo.v8", true);
+  if (saved && !LS.get("momo.v9", false)) { delete saved.source; LS.set("momo.params", saved); }
+  LS.set("momo.v9", true);
+  if (saved && !LS.get("momo.v10", false)) { delete saved.s2_end_hour; LS.set("momo.params", saved); }
+  LS.set("momo.v10", true);
+  if (saved && !LS.get("momo.v11", false)) { delete saved.fill_basis; delete saved.zero_mode; LS.set("momo.params", saved); }
+  LS.set("momo.v11", true);
+  if (saved && !LS.get("momo.v12", false)) { delete saved.fill_basis; LS.set("momo.params", saved); }
+  LS.set("momo.v12", true);
+  if (saved && !LS.get("momo.v13", false)) { delete saved.fill_basis; LS.set("momo.params", saved); }
+  LS.set("momo.v13", true);
   if (saved) Object.entries(saved).forEach(([k, v]) => { if (k in state.params) state.params[k] = (typeof v === "object" && !Array.isArray(v) && v) ? { ...state.params[k], ...v } : v; });
   setTZ(state.params.tz);
   buildParams(); updateBadge(); syncBe(); setDateBounds();
@@ -900,15 +1047,17 @@ async function init() {
   $("#bePct").onchange = () => { const v = Math.min(100, Math.max(1, Number($("#bePct").value) || 50)); $("#bePct").value = v; setP("be_trigger_pct", v); };
   $("#beOff").onchange = () => setP("be_offset_pips", Number($("#beOff").value) || 0);
   $("#beRun").onclick = runBacktest;
-  quickPeriod("tvmax");
+  quickPeriod(state.params.source === "oanda" ? "oandanews" : "tvmax");
+  if (state.params.source === "oanda") $("#oosOn").checked = true;
   $("#oosRow").style.display = $("#oosOn").checked ? "" : "none";
   $("#oosOn").onchange = () => { $("#oosRow").style.display = $("#oosOn").checked ? "" : "none"; periodsFromUI(); };
   ["#isStart", "#isEnd", "#oosStart", "#oosEnd"].forEach(s => $(s).onchange = periodsFromUI);
   $$(".quick button").forEach(b => b.onclick = () => quickPeriod(b.dataset.q));
-  const cov = Object.entries(state.cfg.coverage).map(([p, c]) => c.tv_5 ? `${p} 5m: ${c.tv_5[0].slice(0, 10)} → ${c.tv_5[1].slice(0, 10)}` : null).filter(Boolean);
-  $("#covHint").innerHTML = (cov.length ? "Cached TradingView data:<br>" + cov.join("<br>") : "No data cached yet — the first run downloads it.") +
-    "<br><b>Limit:</b> TradingView (anonymous) serves ~4 weeks of 5m and ~1 week of 1m; the cache keeps everything you download, so history grows if you run regularly. OANDA: years.";
+  $("#covHint").innerHTML = "<b>OANDA, stored on this computer:</b> 1m, 5m and 1H candles (mid, bid, ask) and 5-second candles from Jan 2005. News calendar from Jan 2008: earlier tests run without the news rules. See DATA_QUALITY.md.";
   $$(".tabs button").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+  $("#dayLoad").onclick = loadDay;
+  $("#dayPrev").onclick = () => stepDay(-1);
+  $("#dayNext").onclick = () => stepDay(1);
   $("#btnRun").onclick = runBacktest;
   $("#btnConn").onclick = () => { $("#oaEnv").value = state.cfg.oanda_env; $("#connStatus").textContent = ""; $("#connDlg").showModal(); };
   $("#connSave").onclick = saveConn; $("#verifyBtn").onclick = verifyTv;

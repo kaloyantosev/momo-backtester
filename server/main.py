@@ -1,8 +1,12 @@
 """Local backtest server.  Run:  .venv/bin/python -m uvicorn server.main:app --port 8000"""
 from __future__ import annotations
 
+import ctypes
+import gc
+import json
 import math
 import os
+import sys
 import threading
 import time
 import traceback
@@ -13,13 +17,14 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 import tempfile
 
 from .data import tradingview as tv_mod
 from .data.calendar import load_events
-from .data.store import PAIRS, DataStore
-from .engine.backtest import run_backtest
+from .data.store import NEWS_FIRST, PAIRS, DataStore
+from .engine.backtest import run_backtest, run_backtest_by_year
 from .engine.strategy import DEFAULTS, build_events, merge_params, news_times, pine_indicator_signals, prepare, session_table
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,6 +103,19 @@ def _local_epochs(ts: list | np.ndarray, tz: str) -> list[int]:
     return (idx.asi8 // 10**9).tolist()
 
 
+def _release_memory() -> None:
+    """Hand freed memory back to the system; the C allocator otherwise keeps it for later."""
+    gc.collect()
+    try:
+        libc = ctypes.CDLL(None)
+        if sys.platform == "darwin":
+            libc.malloc_zone_pressure_relief(None, 0)
+        elif sys.platform.startswith("linux"):
+            libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
 def _period(s: str, e: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     a = pd.Timestamp(s, tz="UTC")
     b = pd.Timestamp(e, tz="UTC") + pd.Timedelta(days=1)  # end date inclusive
@@ -106,7 +124,7 @@ def _period(s: str, e: str) -> tuple[pd.Timestamp, pd.Timestamp]:
     return a, b
 
 
-def _load(P: dict, a: pd.Timestamp, b: pd.Timestamp, refresh: bool):
+def _load(P: dict, a: pd.Timestamp, b: pd.Timestamp, refresh: bool, keep: bool = True):
     pairs = [p for p in P["pairs"] if p in PAIRS]
     if not pairs:
         raise HTTPException(400, "Select at least one pair")
@@ -115,7 +133,7 @@ def _load(P: dict, a: pd.Timestamp, b: pd.Timestamp, refresh: bool):
     if "EURJPY" in pairs and "USDJPY" not in pairs:
         need.append("USDJPY")
         extra.append("USDJPY")
-    data = store.get_many(need, P["source"], a, b, refresh)
+    data = store.get_many(need, P["source"], a, b, refresh, keep)
     events = load_events(CACHE / "calendar", (a - pd.Timedelta(days=3)).date(),
                          (b + pd.Timedelta(days=10)).date())
     return {p: data[p] for p in pairs}, {p: data[p] for p in extra}, events
@@ -158,7 +176,7 @@ def index():
 def config():
     return _clean({
         "defaults": DEFAULTS, "pairs": PAIRS,
-        "sources": {"tradingview": True, "oanda": bool(os.environ.get("OANDA_TOKEN"))},
+        "sources": {"tradingview": True, "oanda": bool(os.environ.get("OANDA_TOKEN")), "forexsb": True},
         "tv_login": bool(os.environ.get("TV_SESSIONID")),
         "oanda_env": os.environ.get("OANDA_ENV", "practice"),
         "coverage": store.coverage(),
@@ -172,8 +190,16 @@ def backtest(req: BacktestReq):
     lo = min(a for _, a, _ in periods)
     hi = max(b for _, _, b in periods)
     t0 = time.time()
+    # OANDA history is large: hold one year at a time. Without the daily close a trade can stay open for
+    # weeks, so those runs (and the small TradingView and forexsb files) load their whole range.
+    by_year = P["source"] == "oanda" and P["close_at_day_end"]
     try:
-        pdatas, extra, events = _load(P, lo, hi, req.refresh)
+        if by_year:
+            pdatas, extra, events = None, None, None
+            if req.refresh:
+                _load(P, max(lo, hi - pd.Timedelta(days=62)), hi, True, keep=False)
+        else:
+            pdatas, extra, events = _load(P, lo, hi, req.refresh)
     except HTTPException:
         raise
     except Exception as e:
@@ -182,11 +208,26 @@ def backtest(req: BacktestReq):
     t_load = time.time() - t0
     s5 = store.s5 if P["source"] == "oanda" else None
     client = store.oanda_client() if P["source"] == "oanda" else None
+    loaded = {"sec": t_load, "events": 0 if by_year else len(events)}
+
+    def load_year(params, x, y):
+        _release_memory()
+        t = time.time()
+        out = _load(params, x, y, False, keep=False)
+        loaded["sec"] += time.time() - t
+        loaded["events"] += len(out[2])
+        return out
+
+    def execute(params, a, b):
+        if by_year:
+            return run_backtest_by_year(lambda x, y: load_year(params, x, y), params, a, b, hi, s5, client)
+        return run_backtest(pdatas, events, params, a, b, s5, client, extra)
+
     runs = []
     for name, a, b in periods:
         t1 = time.time()
         try:
-            res = run_backtest(pdatas, events, P, a, b, s5, client, extra)
+            res = execute(P, a, b)
         except Exception as e:
             traceback.print_exc()
             raise HTTPException(500, f"Backtest failed: {e}")
@@ -195,24 +236,27 @@ def backtest(req: BacktestReq):
         amb = sum(1 for t in res["trades"] if "ambiguous" in (t["hook_check"] + t["entry_check"]))
         res["ambiguous_trades"] = amb
         if amb and P["momentum_no5s"] == "range_accept":
-            strict = run_backtest(pdatas, events, {**P, "momentum_no5s": "range_reject"}, a, b, s5, client, extra)
+            strict = execute({**P, "momentum_no5s": "range_reject"}, a, b)
             res["strict_summary"] = strict["metrics"]["summary"]
-        # actual tested range per pair (data may not cover the request)
-        cov = {}
-        for p, d in pdatas.items():
-            m = d.m5[(d.m5.index >= a) & (d.m5.index < b)]
-            cov[p] = [str(m.index[0]) if len(m) else None, str(m.index[-1]) if len(m) else None, int(len(m))]
-        res["coverage"] = cov
+        if P["use_news"] and a < NEWS_FIRST:
+            res["notes"].append(f"News rules are inactive before {NEWS_FIRST:%Y-%m-%d}: the calendar has no earlier events.")
         res["runtime_sec"] = round(time.time() - t1, 2)
         runs.append({"name": name, "start": str(a.date()), "end": str((b - pd.Timedelta(days=1)).date()), "result": res})
-    return JSONResponse(_clean({"runs": runs, "load_sec": round(t_load, 2), "params": P,
-                                "events_loaded": int(len(events))}))
+    return JSONResponse(_clean({"runs": runs, "load_sec": round(loaded["sec"], 2), "params": P,
+                                "events_loaded": int(loaded["events"])}), background=BackgroundTask(_release_memory))
 
 
 @app.post("/api/chart")
 def chart(req: ChartReq):
-    ctx = _chart_context(req.params, req.pair, req.start, req.end)
+    ctx = _chart_context(req.params, req.pair, req.center, req.before, req.after)
     return JSONResponse(_clean(_chart_window(ctx, req.pair, req.center, req.before, req.after)))
+
+
+@app.get("/api/table_days")
+def table_days():
+    """The user's backtesting table per day (percent results as fractions), for the day review."""
+    f = ROOT / "calibration" / "table_days.json"
+    return JSONResponse(json.loads(f.read_text()) if f.exists() else {})
 
 
 class TradeChartsReq(BaseModel):
@@ -227,17 +271,20 @@ class TradeChartsReq(BaseModel):
 
 @app.post("/api/trade_charts")
 def trade_charts(req: TradeChartsReq):
-    """Chart windows for several trades of one pair; indicators are computed once."""
-    ctx = _chart_context(req.params, req.pair, req.start, req.end)
-    return JSONResponse(_clean([_chart_window(ctx, req.pair, c, req.before, req.after) for c in req.centers[:50]]))
+    """Chart windows for several trades of one pair."""
+    return JSONResponse(_clean([_chart_window(_chart_context(req.params, req.pair, c, req.before, req.after), req.pair, c, req.before, req.after)
+                                for c in req.centers[:50]]))
 
 
-def _chart_context(params: dict, pair: str, start: str, end: str) -> dict:
+def _chart_context(params: dict, pair: str, center: str, before: int, after: int) -> dict:
+    """Only the days around the window are loaded, whatever the period of the run was."""
     P = merge_params(params)
-    a, b = _period(start, end)
+    c = pd.Timestamp(center).tz_convert("UTC").normalize()
+    a = c - pd.Timedelta(days=before // 288 + 4)     # 288 bars a day; 4 days covers a weekend or holiday
+    b = c + pd.Timedelta(days=after // 288 + 4)
     if pair not in PAIRS:
         raise HTTPException(400, "unknown pair")
-    data = store.get(pair, P["source"], a, b)
+    data = store.get(pair, P["source"], a, b, with_m1=False)
     events = load_events(CACHE / "calendar", (a - pd.Timedelta(days=3)).date(), (b + pd.Timedelta(days=10)).date())
     pp = prepare(data, P)
     eff, adj, hooks, bos, flips = build_events(pp, P)
@@ -260,9 +307,9 @@ def _chart_window(ctx: dict, pair: str, center_iso: str, before: int, after: int
     t = pp.t5[sl]
     tl = _local_epochs(t, P["tz"])
     marks = []
-    for i, (d, k, ok) in hooks.items():
+    for i, (d, k, ok, why) in hooks.items():
         if lo <= i < hi:
-            marks.append({"i": i - lo, "kind": "hook", "d": d, "ok": ok, "k": k})
+            marks.append({"i": i - lo, "kind": "hook", "d": d, "ok": ok, "k": k, "why": why})
     for i, (d, pierce, rng, ok, why) in bos.items():
         if lo <= i < hi:
             marks.append({"i": i - lo, "kind": "bos", "d": d, "ok": ok, "pierce": pierce, "range": rng, "why": why})
@@ -428,6 +475,7 @@ def verify_tv(body: dict):
 app.add_api_route("/config", config, methods=["GET"])
 app.add_api_route("/backtest", backtest, methods=["POST"])
 app.add_api_route("/chart", chart, methods=["POST"])
+app.add_api_route("/table_days", table_days, methods=["GET"])
 app.add_api_route("/trade_charts", trade_charts, methods=["POST"])
 app.add_api_route("/settings", settings, methods=["POST"])
 app.add_api_route("/tv/download", tv_download, methods=["POST"])

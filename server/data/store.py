@@ -1,7 +1,8 @@
 """Price data store: downloads, caches (parquet / sqlite) and serves bars per pair.
 
 Column convention (all prices):
-  bo,bh,bl,bc  bid OHLC   (for TradingView data: the chart price, which TradingView plots as bid)
+  mo,mh,ml,mc  mid OHLC   (OANDA only; these are the candles TradingView's OANDA: charts plot)
+  bo,bh,bl,bc  bid OHLC   (for TradingView data: the chart price, which is really OANDA mid)
   ao,ah,al,ac  ask OHLC   (OANDA only; TradingView data has no ask -> engine adds a fixed spread)
 Index: bar OPEN time, UTC.
 """
@@ -12,19 +13,31 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
+from . import forexsb as fsb_mod
 from . import oanda as oanda_mod
 from . import tradingview as tv_mod
+
+pa.set_memory_pool(pa.system_memory_pool())   # the default pool keeps freed Parquet buffers for itself
 
 PAIRS = ["EURJPY", "EURUSD", "AUDUSD", "GBPUSD", "USDJPY", "USDCHF"]
 BID = ["bo", "bh", "bl", "bc"]
 ASK = ["ao", "ah", "al", "ac"]
+MID = ["mo", "mh", "ml", "mc"]
+S5_COLS = ["t"] + BID + ASK + MID
+
+
+WARMUP_DAYS = 30                # bars loaded before a test starts, so indicators have converged
+OANDA_FIRST_USABLE = dict.fromkeys(PAIRS, "2005-01-01")   # before this OANDA only has ~26 flat quotes a month
+NEWS_FIRST = pd.Timestamp("2008-01-01", tz="UTC")         # TradingView's calendar has no events before this
 
 
 def pip_size(pair: str) -> float:
@@ -33,6 +46,45 @@ def pip_size(pair: str) -> float:
 
 def tick_size(pair: str) -> float:
     return pip_size(pair) / 10
+
+
+def _ticks_per_unit(pair: str) -> float:
+    return 1e3 if pair.endswith("JPY") else 1e5
+
+
+def write_prices(df: pd.DataFrame, path: Path, pair: str) -> None:
+    """Parquet with prices as whole ticks in delta encoding, less than half the size of plain floats.
+    Prices that don't fit whole ticks exactly stay floats; read_prices takes both."""
+    scale = _ticks_per_unit(pair)
+    out = df.copy()
+    prices = [c for c in df.columns if c != "v"]
+    vals = df[prices].to_numpy(float) * scale
+    if len(df) and np.isfinite(vals).all():
+        ints = np.round(vals)
+        if np.array_equal(ints / scale, df[prices].to_numpy(float)):
+            out[prices] = ints.astype(np.int32)
+    enc = {c: "DELTA_BINARY_PACKED" for c in out.columns if out[c].dtype.kind == "i"}
+    enc[out.index.name or "__index_level_0__"] = "DELTA_BINARY_PACKED"
+    tmp = path.with_suffix(".tmp")
+    out.to_parquet(tmp, compression="zstd", compression_level=9, use_dictionary=False, column_encoding=enc)
+    os.replace(tmp, path)
+
+
+def _index_unit(idx: pd.DatetimeIndex) -> int:
+    """Divisor from the index's integer values to seconds, whatever resolution the file stored."""
+    return {"ns": 10**9, "us": 10**6, "ms": 10**3, "s": 1}[idx.unit]
+
+
+def read_prices(path: Path, pair: str, cols: list[str] | None = None) -> pd.DataFrame:
+    df = pd.read_parquet(path, columns=cols)
+    ints = [c for c in df.columns if c != "v" and df[c].dtype.kind == "i"]
+    if not ints:
+        return df
+    # one float block: the engine then reads the prices without another copy
+    out = pd.DataFrame(df[ints].to_numpy(float) / _ticks_per_unit(pair), index=df.index, columns=ints)
+    for c in df.columns.difference(ints):
+        out[c] = df[c]
+    return out[list(df.columns)] if len(out.columns) > len(ints) else out
 
 
 @dataclass
@@ -48,7 +100,7 @@ class PairData:
 
 def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
     agg = {}
-    for side in ("b", "a"):
+    for side in ("m", "b", "a"):
         if f"{side}o" in df.columns:
             agg.update({f"{side}o": "first", f"{side}h": "max", f"{side}l": "min", f"{side}c": "last"})
     if "v" in df.columns:
@@ -58,16 +110,21 @@ def resample(df: pd.DataFrame, rule: str) -> pd.DataFrame:
 
 
 class S5Cache:
-    """5-second OANDA candles, fetched lazily in 5-minute blocks and kept in sqlite."""
+    """5-second OANDA candles: whole months from the bulk download (S5_YYYY-MM.parquet), anything
+    else fetched lazily in 5-minute blocks and kept in sqlite."""
+
+    MAX_MONTHS = 6     # trades run in time order, so one month per pair is enough
 
     def __init__(self, path: Path):
+        self.root = path.parent
         self.lock = threading.Lock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("CREATE TABLE IF NOT EXISTS s5 (pair TEXT, t INTEGER, bo REAL, bh REAL, bl REAL, bc REAL,"
-                        " ao REAL, ah REAL, al REAL, ac REAL, PRIMARY KEY(pair, t))")
+                        " ao REAL, ah REAL, al REAL, ac REAL, mo REAL, mh REAL, ml REAL, mc REAL, PRIMARY KEY(pair, t))")
         self.db.execute("CREATE TABLE IF NOT EXISTS blocks (pair TEXT, b INTEGER, PRIMARY KEY(pair, b))")
         self.db.commit()
         self._have: dict[str, set[int]] = {}
+        self._months: OrderedDict = OrderedDict()
 
     def _known(self, pair: str) -> set[int]:
         if pair not in self._have:
@@ -76,37 +133,64 @@ class S5Cache:
             self._have[pair] = {r[0] for r in rows}
         return self._have[pair]
 
+    def _month_file(self, pair: str, t: int) -> Path:
+        d = dt.datetime.fromtimestamp(t, dt.timezone.utc)
+        return self.root / pair / f"S5_{d.year:04d}-{d.month:02d}.parquet"
+
+    def _month(self, pair: str, t: int) -> tuple | None:
+        """The bulk-downloaded month containing t as (times, prices in file form, divisor), or None."""
+        f = self._month_file(pair, t)
+        with self.lock:
+            if f in self._months:
+                self._months.move_to_end(f)
+                return self._months[f]
+        if not f.exists():
+            return None
+        df = pd.read_parquet(f, columns=S5_COLS[1:])
+        ints = all(k == "i" for k in df.dtypes.map(lambda x: x.kind))
+        a = (df.index.asi8 // _index_unit(df.index), df.to_numpy(np.int32 if ints else float), _ticks_per_unit(pair) if ints else 1.0)
+        with self.lock:
+            self._months[f] = a
+            while len(self._months) > self.MAX_MONTHS:
+                self._months.popitem(last=False)
+        return a
+
     def ensure(self, client: oanda_mod.OandaClient, items: list[tuple[str, int]], workers: int = 8):
-        todo = sorted({(p, int(b // 300 * 300)) for p, b in items if int(b // 300 * 300) not in self._known(p)})
-        if not todo:
+        todo = sorted({(p, int(b // 300 * 300)) for p, b in items
+                       if int(b // 300 * 300) not in self._known(p) and not self._month_file(p, b).exists()})
+        if not todo or client is None:
             return
 
         def fetch(item):
             p, b = item
             df = client.s5_window(p, dt.datetime.fromtimestamp(b, dt.timezone.utc), 60)
-            df = df[(df["t"] >= b) & (df["t"] < b + 300)]
+            df = df[(df["t"] >= b) & (df["t"] < b + 300)] if len(df) else df
             return p, b, df
 
         with ThreadPoolExecutor(workers) as ex:
             for p, b, df in ex.map(fetch, todo):
                 with self.lock:
-                    self.db.executemany("INSERT OR REPLACE INTO s5 VALUES (?,?,?,?,?,?,?,?,?,?)",
-                                        [(p, int(r.t), r.bo, r.bh, r.bl, r.bc, r.ao, r.ah, r.al, r.ac)
-                                         for r in df.itertuples()])
+                    self.db.executemany("INSERT OR REPLACE INTO s5 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                        [(p, int(r.t), r.bo, r.bh, r.bl, r.bc, r.ao, r.ah, r.al, r.ac,
+                                          r.mo, r.mh, r.ml, r.mc) for r in df.itertuples()])
                     self.db.execute("INSERT OR REPLACE INTO blocks VALUES (?,?)", (p, b))
                 self._known(p).add(b)
         with self.lock:
             self.db.commit()
 
     def get(self, pair: str, t0: int, t1: int) -> np.ndarray:
-        """rows with t in [t0, t1): columns t,bo,bh,bl,bc,ao,ah,al,ac"""
+        """rows with t in [t0, t1): columns t,bo,bh,bl,bc,ao,ah,al,ac,mo,mh,ml,mc"""
+        a = self._month(pair, t0)
+        if a is not None and self._month_file(pair, t1 - 1) == self._month_file(pair, t0):
+            i, j = np.searchsorted(a[0], t0), np.searchsorted(a[0], t1)
+            return np.column_stack([a[0][i:j], a[1][i:j] / a[2]])
         with self.lock:
-            rows = self.db.execute("SELECT t,bo,bh,bl,bc,ao,ah,al,ac FROM s5 WHERE pair=? AND t>=? AND t<? ORDER BY t",
+            rows = self.db.execute(f"SELECT {','.join(S5_COLS)} FROM s5 WHERE pair=? AND t>=? AND t<? ORDER BY t",
                                    (pair, int(t0), int(t1))).fetchall()
-        return np.array(rows, dtype=float).reshape(-1, 9)
+        return np.array(rows, dtype=float).reshape(-1, len(S5_COLS))
 
     def has_block(self, pair: str, t: int) -> bool:
-        return int(t // 300 * 300) in self._known(pair)
+        return self._month_file(pair, t).exists() or int(t // 300 * 300) in self._known(pair)
 
 
 class DataStore:
@@ -114,7 +198,7 @@ class DataStore:
         self.cache = cache_dir
         (self.cache / "tv").mkdir(parents=True, exist_ok=True)
         (self.cache / "oanda").mkdir(parents=True, exist_ok=True)
-        self.s5 = S5Cache(self.cache / "oanda" / "s5.sqlite")
+        self.s5 = S5Cache(self.cache / "oanda" / "s5_blocks.sqlite")
         self._mem: dict = {}
         self.lock = threading.Lock()
 
@@ -242,64 +326,109 @@ class DataStore:
         return out
 
     # ------------------------------------------------------------- OANDA
-    def _oanda_month(self, client, pair: str, y: int, m: int, force: bool) -> pd.DataFrame:
+    def _oanda_month(self, client, pair: str, y: int, m: int, force: bool) -> None:
+        """Make sure M1 / M5 / H1 files of one month are on disk. M5 and H1 are built from M1; on the whole
+        overlap with OANDA's own M5 and H1 candles they are identical (see DATA_QUALITY.md)."""
         d = self.cache / "oanda" / pair
         d.mkdir(parents=True, exist_ok=True)
-        f = d / f"M1_{y:04d}-{m:02d}.parquet"
+        name = f"{y:04d}-{m:02d}.parquet"
+        f = d / f"M1_{name}"
         a = dt.datetime(y, m, 1, tzinfo=dt.timezone.utc)
         b = dt.datetime(y + (m == 12), m % 12 + 1, 1, tzinfo=dt.timezone.utc)
         now = dt.datetime.now(dt.timezone.utc)
-        complete = b <= now - dt.timedelta(hours=1)
         if f.exists() and not force:
-            if complete or time.time() - f.stat().st_mtime < 15 * 60:
-                return pd.read_parquet(f)
-        df = client.candles(pair, "M1", a, min(b, now))
-        df.to_parquet(f)
-        return df
-
-    def _oanda_load(self, pair: str, start: pd.Timestamp, end: pd.Timestamp, force: bool) -> PairData:
-        client = self.oanda_client()
+            written = f.stat().st_mtime
+            # a month saved before it ended is still partial, however old the file is
+            if written >= (b + dt.timedelta(hours=1)).timestamp() or time.time() - written < 15 * 60 or client is None:
+                return
         if client is None:
-            raise RuntimeError("OANDA source selected but no OANDA_TOKEN configured (see Data connections).")
-        a = (start - pd.Timedelta(days=25)).to_pydatetime()
-        b = end.to_pydatetime()
+            raise RuntimeError("OANDA data missing and no OANDA_TOKEN configured (see Data connections).")
+        df = client.candles(pair, "M1", a, min(b, now))
+        for frame, target in ((resample(df, "5min"), d / f"M5_{name}"), (resample(df, "1h"), d / f"H1_{name}"),
+                              (df, f)):   # M1 last: its presence means the month is complete on disk
+            write_prices(frame, target, pair)
+
+    def _oanda_read(self, pair: str, tf: str, months: list, cols: list[str] | None = None) -> pd.DataFrame:
+        d = self.cache / "oanda" / pair
+        parts = [read_prices(d / f"{tf}_{y:04d}-{m:02d}.parquet", pair, cols) for y, m in months]
+        parts = [x for x in parts if len(x)]
+        if not parts:
+            return pd.DataFrame(columns=cols or BID + ASK + MID, index=pd.DatetimeIndex([], tz="UTC"), dtype=float)
+        out = pd.concat(parts)
+        return out if out.index.is_monotonic_increasing else out.sort_index()
+
+    def _oanda_load(self, pair: str, start: pd.Timestamp, end: pd.Timestamp, force: bool, with_m1: bool = True) -> PairData:
+        client = self.oanda_client()
+        first = OANDA_FIRST_USABLE.get(pair)
+        lo = max(start - pd.Timedelta(days=WARMUP_DAYS), pd.Timestamp(first, tz="UTC")) if first else start - pd.Timedelta(days=WARMUP_DAYS)
         months = []
-        y, m = a.year, a.month
-        while (y, m) <= (b.year, b.month):
+        y, m = lo.year, lo.month
+        while (y, m) <= (end.year, end.month):
             months.append((y, m))
             m += 1
             if m == 13:
                 y, m = y + 1, 1
         with ThreadPoolExecutor(4) as ex:
-            parts = list(ex.map(lambda ym: self._oanda_month(client, pair, ym[0], ym[1], force), months))
-        m1 = pd.concat([p for p in parts if len(p)]).sort_index()
-        m1 = m1[~m1.index.duplicated(keep="last")]
-        m5 = resample(m1, "5min")
-        h1 = resample(m1, "1h")
+            # OANDA's past candles don't change: "re-download" only needs to redo the latest months
+            list(ex.map(lambda ym: self._oanda_month(client, pair, ym[0], ym[1], force and ym in months[-2:]), months))
+        sl = slice(lo, end)
+        m5 = self._oanda_read(pair, "M5", months, MID + BID + ASK).loc[sl]
+        h1 = self._oanda_read(pair, "H1", months, MID + BID + ASK).loc[sl]
+        m1 = self._oanda_read(pair, "M1", months, BID + ASK).loc[sl] if with_m1 else None
         notes = []
         if len(m5) and m5.index[0] > start:
-            notes.append(f"{pair}: OANDA data starts {m5.index[0]:%Y-%m-%d}.")
+            notes.append(f"{pair}: OANDA data used here starts {m5.index[0]:%Y-%m-%d}.")
+        elif first and start - pd.Timedelta(days=WARMUP_DAYS) < pd.Timestamp(first, tz="UTC"):
+            notes.append(f"{pair}: under {WARMUP_DAYS} days of indicator warm-up before {start:%Y-%m-%d}.")
+        return PairData(pair, "oanda", m5, h1, m1, True, notes)
+
+    # ------------------------------------------------------------- forexsb.com (Dukascopy bars)
+    def _fsb_load(self, pair: str, start: pd.Timestamp, end: pd.Timestamp, force: bool) -> PairData:
+        d = self.cache / "fsb"
+        if force or not (d / f"{pair}_5.parquet").exists():
+            fsb_mod.download([pair], [1, 5, 30], d / "raw")
+            fsb_mod.build_cache(d / "raw", d, [pair])
+        m5 = pd.read_parquet(d / f"{pair}_5.parquet")
+        h1 = pd.read_parquet(d / f"{pair}_60.parquet")
+        m1 = pd.read_parquet(d / f"{pair}_1.parquet") if (d / f"{pair}_1.parquet").exists() else None
+        notes = []
+        if len(m5) and m5.index[0] > start:
+            notes.append(f"{pair}: Dukascopy 5m history (forexsb) starts {m5.index[0]:%Y-%m-%d %H:%M} UTC "
+                         f"(requested {start:%Y-%m-%d}). Earlier dates are NOT tested.")
+        if m1 is not None and len(m1) and m1.index[0] > start:
+            notes.append(f"{pair}: 1m bars only from {m1.index[0]:%Y-%m-%d}; before that intrabar order is "
+                         f"resolved on 5m bars (pessimistic).")
+        notes.append(f"{pair}: Dukascopy feed, not OANDA — prices differ slightly from your TradingView chart.")
         sl = slice(start - pd.Timedelta(days=12), end)
-        return PairData(pair, "oanda", m5.loc[sl], h1.loc[start - pd.Timedelta(days=25):end], m1.loc[sl], True, notes)
+        cols = ["bo", "bh", "bl", "bc", "v"]
+        return PairData(pair, "forexsb", m5.loc[sl, cols], h1.loc[start - pd.Timedelta(days=60):end, cols],
+                        m1.loc[sl, cols] if m1 is not None and len(m1) else None, False, notes)
 
     # ------------------------------------------------------------- public
     def get_many(self, pairs: list[str], source: str, start: pd.Timestamp, end: pd.Timestamp,
-                 force: bool = False) -> dict[str, PairData]:
-        with ThreadPoolExecutor(6) as ex:
-            res = list(ex.map(lambda p: self.get(p, source, start, end, force), pairs))
+                 force: bool = False, keep: bool = True) -> dict[str, PairData]:
+        with ThreadPoolExecutor(3) as ex:     # more buffers overlap in memory with little time gained
+            res = list(ex.map(lambda p: self.get(p, source, start, end, force, keep), pairs))
         return dict(zip(pairs, res))
 
-    def get(self, pair: str, source: str, start: pd.Timestamp, end: pd.Timestamp, force: bool = False) -> PairData:
-        key = (pair, source, start, end)
+    def get(self, pair: str, source: str, start: pd.Timestamp, end: pd.Timestamp, force: bool = False,
+            keep: bool = True, with_m1: bool = True) -> PairData:
+        """keep=False: don't hold it in memory after this use. with_m1=False: charts don't need 1m bars."""
+        key = (pair, source, start, end, with_m1)
         with self.lock:
             if not force and key in self._mem and time.time() - self._mem[key][0] < 10 * 60:
                 return self._mem[key][1]
         if source == "oanda":
-            pdata = self._oanda_load(pair, start, end, force)
+            pdata = self._oanda_load(pair, start, end, force, with_m1)
+        elif source == "forexsb":
+            pdata = self._fsb_load(pair, start, end, force)
         else:
             pdata = self._tv_load(pair, start, end, force)
-        with self.lock:
-            self._mem[key] = (time.time(), pdata)
+        if keep:
+            with self.lock:
+                self._mem[key] = (time.time(), pdata)
+                while len(self._mem) > 14:
+                    self._mem.pop(next(iter(self._mem)))
         return pdata
 
     def coverage(self) -> dict:
@@ -311,6 +440,11 @@ class DataStore:
                 if f.exists():
                     idx = pd.read_parquet(f, columns=["bc"]).index
                     info[f"tv_{tf}"] = [str(idx[0]), str(idx[-1]), len(idx)]
+            for tf in ("1", "5", "60"):
+                f = self.cache / "fsb" / f"{pair}_{tf}.parquet"
+                if f.exists():
+                    idx = pd.read_parquet(f, columns=["bc"]).index
+                    info[f"fsb_{tf}"] = [str(idx[0]), str(idx[-1]), len(idx)]
             d = self.cache / "oanda" / pair
             if d.exists():
                 files = sorted(d.glob("M1_*.parquet"))

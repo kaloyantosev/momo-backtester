@@ -1,9 +1,9 @@
 # MOMO backtester — EMA + Supertrend + MACD hook + ADX sessions
 
 A local server with a browser dashboard that backtests the strategy on the six OANDA pairs
-(EURJPY, EURUSD, AUDUSD, GBPUSD, USDJPY, USDCHF). Prices come from TradingView's data feed
-(`OANDA:<PAIR>` symbols) and news comes from TradingView's economic calendar. An optional OANDA API
-token adds years of history and 5-second precision.
+(EURJPY, EURUSD, AUDUSD, GBPUSD, USDJPY, USDCHF). Prices come from OANDA's v20 API, stored on this
+computer from January 2005, and news comes from TradingView's economic calendar. How the data was
+checked is in [DATA_QUALITY.md](DATA_QUALITY.md).
 
 ## How to Run Locally
 
@@ -59,12 +59,12 @@ git push -u origin main
 
 | Source | Needs | History | Precision |
 |---|---|---|---|
-| **TradingView** (default) | nothing | anonymous: 1m ≈ 1 week, 5m ≈ 4 weeks, 1H ≈ 1.5–2 years. A `sessionid` cookie from a paid plan raises this. | 1m where available, otherwise 5m. There is no ask price, so a fixed spread is added (Costs). |
-| **OANDA v20** | free practice-account API token (Data connections) | years of 1m bid/ask | real bid/ask. 5-second candles for the +30 s entry and for any 1m bar where SL and TP are both touched. |
-| TradingView economic calendar | nothing | full history | importance −1/0/1 = low/medium/high |
+| **OANDA v20** (default) | free practice-account API token (Data connections) | 1m, 5m, 1H and 5-second candles, mid/bid/ask, from Jan 2005 | Signals use OANDA's mid candles, which are what TradingView plots. Fills are at the chart price by default, because MT5 fills at bid = ask; real bid/ask is an option under Costs. 5-second candles decide the +30 s checks, the entry and any 1m bar where SL and TP are both touched. |
+| **TradingView** | nothing | anonymous: 1m ≈ 1 week, 5m ≈ 4 weeks, 1H ≈ 1.5–2 years. A `sessionid` cookie from a paid plan raises this. | For comparing with your chart. 1m where available, otherwise 5m. There is no ask price, so a fixed spread is added (Costs). |
+| TradingView economic calendar | nothing | from Jan 2008 | importance −1/0/1 = low/medium/high |
 
-OANDA is the price provider behind TradingView's OANDA symbols. Use it for any serious in-sample or
-out-of-sample test, because four weeks of 5m data is far too little.
+Bulk download of the OANDA history, safe to stop and re-run: `python -m server.data.oanda_sync m1`, then
+`python -m server.data.oanda_sync s5 2005-01`. A full history test of all pairs takes about 15–25 seconds.
 
 **Deeper TradingView history.** Paste your TradingView `sessionid` cookie under *Data connections*
 (never your password). Then use *Check what my session can see* and *Download history*. The
@@ -82,7 +82,7 @@ indicators disagree, your text wins.
   **last completed** 1H candle is read, so the 11:00 check uses the 10:00–11:00 candle. All times in
   the dashboard are BGN. ADX is computed with the indicator's own
   non-standard `calc_adx`. The pair is green when 25 ≤ ADX ≤ 40. Green at 11:00 opens 11:00–15:00 BGN;
-  green at 15:00 opens 15:00–21:00 BGN (21:00 BGN = 19:00 London).
+  green at 15:00 opens 15:00–22:00 BGN (22:00 BGN = 20:00 London). Every open trade closes at 22:00 BGN.
 * **EMA BOS.** Only the candle whose close crosses EMA(20) is measured. Its **body** top (bottom
   for sells) must be ≥ 0.8 pip beyond the EMA; wicks don't count. If that candle fails, a later candle
   can't turn it into a BOS. The BOS candle's high–low (wick to wick) must be ≤ 12 pips. Indicator 1's
@@ -93,10 +93,8 @@ indicators disagree, your text wins.
   from indicator 2.
   * **Zero rule.** A "0 bar" is one that *displays* as 0 at the chart's precision. On JPY pairs that
     is 0.000 (|hist| < 0.0005; from 0.0005 it shows 0.001 and is a real bar). On the other pairs it is
-    0.00000. A 0 bar right before, on, or right after the colour change never counts as the new
-    colour. So the hook
-    bar must have a real value, and a 0-bar right after the hook breaks it. Another option reads it
-    as the opposite of the colour TradingView paints.
+    0.00000. A 0 bar right before, on, or right after the colour change counts as the opposite of the
+    colour TradingView paints it. Other readings are selectable under MACD hook.
   * **2-bar rule.** The hook bar and the bar after it must both rise (buys) or both fall (sells). The
     second bar is measured 30 s after it opens.
   * **No fading momentum.** Every bar from the hook to the signal bar must be stronger than the one
@@ -108,8 +106,8 @@ indicators disagree, your text wins.
   * The histogram must stay on its new side, and Supertrend must keep its direction until entry.
 * **Entry.** A market order 30 s after the next candle opens, only if that bar's histogram,
   recomputed with the price at that second, is above **both** the previous bar and the hook bar
-  (below for sells). A light green / light red entry bar invalidates the setup. Buys fill at the
-  ask, sells at the bid.
+  (below for sells). A light green / light red entry bar invalidates the setup. Fills are at the
+  chart price, or at the ask for buys and the bid for sells with real bid/ask fills.
 * **Blocked entries.** No entry within ±10 min of medium/high news (TradingView calendar) for the
   countries US, EU, CH, AU, JP. By default only the pair's own currencies count, as in indicator 1.
   GB is not in your list, so GBPUSD is only filtered by US news.
@@ -185,3 +183,23 @@ server/engine/metrics.py     performance metrics
 web/                         dashboard (TradingView Lightweight Charts)
 tests/                       rule-level tests
 ```
+
+## Rules added on 28 Oct 2026
+
+* **0 bars are red.** A histogram bar that shows 0.00000 (0.000 on JPY pairs) always counts as red.
+* **Flat hooks.** If the last two bars before the colour change show the same value
+  (e.g. −0.00001 and −0.00001), it is not a hook.
+* **Supertrend first.** If the Supertrend flips before the MACD, the MACD must flip on the same
+  candle or the next one. Otherwise there is no setup.
+* **Whole setup in session.** Hook, Supertrend flip, BOS and signal candle must all lie inside an
+  ADX-confirmed session, not only the entry.
+* **Candle size.** Every setup candle, from the first signal to the signal candle, must be
+  ≤ 12 pips high–low.
+* **Momentum exit.** If the entry candle closes with a weaker histogram than the signal candle, the
+  trade is closed at the open of the next candle.
+* **Commission.** 5 USD per lot, round turn, by default; it can be changed in Costs.
+* **Trade cards.** Each card lists every setup candle: range in pips, body distance to the EMA,
+  histogram value as displayed, and the colour it was counted as. The chart shows the same pip
+  labels.
+* **Near-misses.** Setups that failed only on the MACD side are listed under Setups & rejections with
+  the exact reason.

@@ -38,15 +38,23 @@ class OandaClient:
         return c
 
     def _get(self, path: str, params: dict) -> dict:
-        for attempt in range(6):
-            r = self.http.get(self.base + path, params=params)
-            if r.status_code == 429 or r.status_code >= 500:
+        r = None
+        for attempt in range(8):
+            try:
+                r = self.http.get(self.base + path, params=params)
+            except httpx.TransportError:
+                time.sleep(1 + attempt)
+                continue
+            # a new token is refused now and then for a few minutes, so a 401 is only final if it persists
+            if r.status_code == 429 or r.status_code >= 500 or (r.status_code == 401 and attempt < 3):
                 time.sleep(0.5 * (attempt + 1))
                 continue
             if r.status_code == 401:
                 raise RuntimeError("OANDA rejected the token (401). Check token and practice/live setting.")
             r.raise_for_status()
             return r.json()
+        if r is None:
+            raise RuntimeError(f"OANDA unreachable: {path}")
         r.raise_for_status()
         return {}
 
@@ -56,13 +64,17 @@ class OandaClient:
 
     def candles(self, pair: str, granularity: str, start: dt.datetime, end: dt.datetime,
                 count: int = 5000) -> pd.DataFrame:
-        """All complete bid/ask candles with start time in [start, end)."""
+        """All complete mid/bid/ask candles with start time in [start, end).
+
+        Mid is requested from OANDA because it is what TradingView's OANDA: charts plot. The high of
+        (bid + ask) / 2 is a different number: bid and ask do not peak at the same moment.
+        """
         rows = []
         cur = start.timestamp()
         end_ts = end.timestamp()
         first = True
         while cur < end_ts:
-            params = {"granularity": granularity, "price": "BA", "from": f"{cur:.0f}", "count": count,
+            params = {"granularity": granularity, "price": "MBA", "from": f"{cur:.0f}", "count": count,
                       "smooth": "false", "includeFirst": "true" if first else "false"}
             data = self._get(f"/v3/instruments/{instrument(pair)}/candles", params)
             cs = data.get("candles", [])
@@ -74,26 +86,31 @@ class OandaClient:
                     break
                 if not c.get("complete", True):
                     continue
-                b, a = c["bid"], c["ask"]
-                rows.append((t, float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"]),
+                m, b, a = c["mid"], c["bid"], c["ask"]
+                rows.append((t, float(m["o"]), float(m["h"]), float(m["l"]), float(m["c"]),
+                             float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"]),
                              float(a["o"]), float(a["h"]), float(a["l"]), float(a["c"]), int(c["volume"])))
             last_t = float(cs[-1]["time"])
-            if len(cs) < count or last_t >= end_ts or (last_t <= cur and not first):
+            # no "page shorter than count" stop: includeFirst=false pages hold count - 1 candles
+            if last_t >= end_ts or (last_t <= cur and not first):
                 break
             cur = last_t
             first = False
-        df = pd.DataFrame(rows, columns=["t", "bo", "bh", "bl", "bc", "ao", "ah", "al", "ac", "v"])
+        df = pd.DataFrame(rows, columns=["t", "mo", "mh", "ml", "mc", "bo", "bh", "bl", "bc",
+                                         "ao", "ah", "al", "ac", "v"])
         df["t"] = pd.to_datetime(df["t"], unit="s", utc=True)
         return df.drop_duplicates("t").set_index("t").sort_index()
 
     def s5_window(self, pair: str, start: dt.datetime, n: int) -> pd.DataFrame:
-        """`n` S5 candles starting at `start` (includes incomplete=False only)."""
-        params = {"granularity": "S5", "price": "BA", "from": f"{start.timestamp():.0f}", "count": n,
+        """`n` S5 candles starting at `start`."""
+        params = {"granularity": "S5", "price": "MBA", "from": f"{start.timestamp():.0f}", "count": n,
                   "smooth": "false", "includeFirst": "true"}
         data = self._get(f"/v3/instruments/{instrument(pair)}/candles", params)
         rows = []
         for c in data.get("candles", []):
-            b, a = c["bid"], c["ask"]
+            b, a, m = c["bid"], c["ask"], c["mid"]
             rows.append((float(c["time"]), float(b["o"]), float(b["h"]), float(b["l"]), float(b["c"]),
-                         float(a["o"]), float(a["h"]), float(a["l"]), float(a["c"])))
-        return pd.DataFrame(rows, columns=["t", "bo", "bh", "bl", "bc", "ao", "ah", "al", "ac"])
+                         float(a["o"]), float(a["h"]), float(a["l"]), float(a["c"]),
+                         float(m["o"]), float(m["h"]), float(m["l"]), float(m["c"])))
+        return pd.DataFrame(rows, columns=["t", "bo", "bh", "bl", "bc", "ao", "ah", "al", "ac",
+                                           "mo", "mh", "ml", "mc"])

@@ -12,55 +12,47 @@ import numpy as np
 NaN = float("nan")
 
 
-def ema(src: np.ndarray, n: int) -> np.ndarray:
-    """ta.ema: alpha = 2/(n+1), seeded with the SMA of the first n non-na values (as the built-in plots)."""
-    out = np.full(len(src), NaN)
-    alpha = 2.0 / (n + 1)
-    acc, cnt, prev = 0.0, 0, NaN
-    for i, x in enumerate(src):
-        if math.isnan(x):
+def _seeded_recursive(src: np.ndarray, n: int, alpha: float) -> np.ndarray:
+    """alpha * x + (1 - alpha) * prev, seeded with the SMA of the first n non-na values."""
+    x = src.tolist()
+    out = [NaN] * len(x)
+    acc, cnt = 0.0, 0
+    prev = NaN
+    seeded = False
+    beta = 1 - alpha
+    for i, v in enumerate(x):
+        if v != v:
             continue
-        if math.isnan(prev):
-            acc += x
+        if seeded:
+            prev = alpha * v + beta * prev
+            out[i] = prev
+        else:
+            acc += v
             cnt += 1
             if cnt == n:
                 prev = acc / n
                 out[i] = prev
-            continue
-        prev = alpha * x + (1 - alpha) * prev
-        out[i] = prev
-    return out
+                seeded = True
+    return np.array(out, dtype=float)
+
+
+def ema(src: np.ndarray, n: int) -> np.ndarray:
+    """ta.ema: alpha = 2/(n+1), seeded with the SMA of the first n non-na values (as the built-in plots)."""
+    return _seeded_recursive(src, n, 2.0 / (n + 1))
 
 
 def sma(src: np.ndarray, n: int) -> np.ndarray:
     """ta.sma: na until n values are available; na if any value in the window is na."""
     out = np.full(len(src), NaN)
     s = np.asarray(src, dtype=float)
-    for i in range(n - 1, len(s)):
-        w = s[i - n + 1:i + 1]
-        if not np.isnan(w).any():
-            out[i] = w.sum() / n
+    if len(s) >= n:
+        out[n - 1:] = np.lib.stride_tricks.sliding_window_view(s, n).sum(axis=1) / n  # a na in the window gives na
     return out
 
 
 def rma(src: np.ndarray, n: int) -> np.ndarray:
     """ta.rma: alpha = 1/n, seeded with SMA of the first n values."""
-    out = np.full(len(src), NaN)
-    alpha = 1.0 / n
-    acc, cnt, prev = 0.0, 0, NaN
-    for i, x in enumerate(src):
-        if math.isnan(x):
-            continue
-        if math.isnan(prev):
-            acc += x
-            cnt += 1
-            if cnt == n:
-                prev = acc / n
-                out[i] = prev
-            continue
-        prev = alpha * x + (1 - alpha) * prev
-        out[i] = prev
-    return out
+    return _seeded_recursive(src, n, 1.0 / n)
 
 
 def true_range(h: np.ndarray, l: np.ndarray, c: np.ndarray) -> np.ndarray:
@@ -83,32 +75,30 @@ def supertrend(h: np.ndarray, l: np.ndarray, c: np.ndarray, factor: float, n: in
     """
     a = atr(h, l, c, n)
     size = len(c)
-    st = np.full(size, NaN)
-    d = np.full(size, NaN)
-    ub = np.full(size, NaN)
-    lb = np.full(size, NaN)
+    hl, ll, cl, al = h.tolist(), l.tolist(), c.tolist(), a.tolist()
+    st, d, ub, lb = [NaN] * size, [NaN] * size, [NaN] * size, [NaN] * size
     prev_ub = prev_lb = NaN
     prev_st = NaN
     for i in range(size):
-        src = (h[i] + l[i]) / 2
-        upper = src + factor * a[i]
-        lower = src - factor * a[i]
-        p_lb = 0.0 if math.isnan(prev_lb) else prev_lb
-        p_ub = 0.0 if math.isnan(prev_ub) else prev_ub
-        pc = c[i - 1] if i > 0 else NaN
+        src = (hl[i] + ll[i]) / 2
+        upper = src + factor * al[i]
+        lower = src - factor * al[i]
+        p_lb = 0.0 if prev_lb != prev_lb else prev_lb
+        p_ub = 0.0 if prev_ub != prev_ub else prev_ub
+        pc = cl[i - 1] if i > 0 else NaN
         # lowerBand := lowerBand > prevLowerBand or close[1] < prevLowerBand ? lowerBand : prevLowerBand
         lower = lower if (lower > p_lb or (pc < p_lb)) else p_lb
         upper = upper if (upper < p_ub or (pc > p_ub)) else p_ub
-        if i == 0 or math.isnan(a[i - 1]):
+        if i == 0 or al[i - 1] != al[i - 1]:
             di = 1
         elif prev_st == p_ub:
-            di = -1 if c[i] > upper else 1
+            di = -1 if cl[i] > upper else 1
         else:
-            di = 1 if c[i] < lower else -1
+            di = 1 if cl[i] < lower else -1
         s = lower if di == -1 else upper
         st[i], d[i], ub[i], lb[i] = s, di, upper, lower
         prev_ub, prev_lb, prev_st = upper, lower, s
-    return st, d, ub, lb, a
+    return np.array(st), np.array(d, dtype=float), np.array(ub), np.array(lb), a
 
 
 def supertrend_live(h_part: float, l_part: float, c_now: float, prev_close: float, prev_atr: float,
@@ -161,15 +151,15 @@ def macd_critical_price(ref: float, prev_fast: float, prev_slow: float, prev_sig
 def custom_adx(h: np.ndarray, l: np.ndarray, c: np.ndarray, n: int) -> np.ndarray:
     """calc_adx() from 'MACD + ADX Auto-Scale v2' (non-standard: SMA of DX, sums seeded from 0, nz(close[1]))."""
     size = len(c)
-    dx = np.empty(size)
+    hl, ll, cl = h.tolist(), l.tolist(), c.tolist()
+    dx = [0.0] * size
     str_ = sp = sm = 0.0
+    pc = ph = pl = 0.0
     for i in range(size):
-        pc = c[i - 1] if i > 0 else 0.0
-        ph = h[i - 1] if i > 0 else 0.0
-        pl = l[i - 1] if i > 0 else 0.0
-        tr = max(max(h[i] - l[i], abs(h[i] - pc)), abs(l[i] - pc))
-        up = h[i] - ph
-        dn = pl - l[i]
+        hi, lo = hl[i], ll[i]
+        tr = max(max(hi - lo, abs(hi - pc)), abs(lo - pc))
+        up = hi - ph
+        dn = pl - lo
         dmp = max(up, 0.0) if up > dn else 0.0
         dmm = max(dn, 0.0) if dn > up else 0.0
         str_ = str_ - str_ / n + tr
@@ -178,6 +168,8 @@ def custom_adx(h: np.ndarray, l: np.ndarray, c: np.ndarray, n: int) -> np.ndarra
         dip = sp / str_ * 100 if str_ > 0 else 0.0
         dim = sm / str_ * 100 if str_ > 0 else 0.0
         dx[i] = abs(dip - dim) / (dip + dim) * 100 if (dip + dim) > 0 else 0.0
+        pc, ph, pl = cl[i], hi, lo
+    dx = np.array(dx)
     return sma(dx, n)
 
 

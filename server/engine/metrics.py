@@ -60,7 +60,7 @@ def compute_metrics(trades: list[dict], full: dict | None, bal0: float, start: p
     dd_days = 0.0
     final = bal0 + net
     daily_rows = []
-    if full and full["t"]:
+    if full and len(full["t"]):
         t = np.array(full["t"], dtype=np.int64)
         e = np.array(full["equity"], dtype=float)
         peak = np.maximum.accumulate(np.maximum(e, bal0))
