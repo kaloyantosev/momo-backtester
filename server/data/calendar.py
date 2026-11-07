@@ -56,6 +56,12 @@ def _fetch_month(y: int, m: int) -> list[dict]:
 
 
 def load_events(cache_dir: Path, start: dt.date, end: dt.date) -> pd.DataFrame:
+    packed = cache_dir.parent / "calendar.parquet" if cache_dir.name == "calendar" else cache_dir / "calendar.parquet"
+    if packed.exists():
+        df = pd.read_parquet(packed)
+        t0 = pd.Timestamp(start, tz="UTC")
+        t1 = pd.Timestamp(end + dt.timedelta(days=1), tz="UTC")
+        return df[(df["t"] >= t0) & (df["t"] < t1)].reset_index(drop=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
     today = dt.datetime.now(dt.timezone.utc).date()
     rows = []

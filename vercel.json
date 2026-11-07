@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/index.py": {
-      "includeFiles": "server/**",
+      "includeFiles": "{server,data_cache}/**",
       "maxDuration": 60
     }
   },

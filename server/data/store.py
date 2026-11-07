@@ -116,21 +116,32 @@ class S5Cache:
     MAX_MONTHS = 6     # trades run in time order, so one month per pair is enough
 
     def __init__(self, path: Path):
+        self.path = path
         self.root = path.parent
         self.lock = threading.Lock()
-        self.db = sqlite3.connect(str(path), check_same_thread=False)
-        self.db.execute("CREATE TABLE IF NOT EXISTS s5 (pair TEXT, t INTEGER, bo REAL, bh REAL, bl REAL, bc REAL,"
-                        " ao REAL, ah REAL, al REAL, ac REAL, mo REAL, mh REAL, ml REAL, mc REAL, PRIMARY KEY(pair, t))")
-        self.db.execute("CREATE TABLE IF NOT EXISTS blocks (pair TEXT, b INTEGER, PRIMARY KEY(pair, b))")
-        self.db.commit()
+        self._db: sqlite3.Connection | None = None
         self._have: dict[str, set[int]] = {}
         self._months: OrderedDict = OrderedDict()
 
+    @property
+    def db(self) -> sqlite3.Connection:
+        if self._db is None:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._db = sqlite3.connect(str(self.path), check_same_thread=False)
+            self._db.execute("CREATE TABLE IF NOT EXISTS s5 (pair TEXT, t INTEGER, bo REAL, bh REAL, bl REAL, bc REAL,"
+                             " ao REAL, ah REAL, al REAL, ac REAL, mo REAL, mh REAL, ml REAL, mc REAL, PRIMARY KEY(pair, t))")
+            self._db.execute("CREATE TABLE IF NOT EXISTS blocks (pair TEXT, b INTEGER, PRIMARY KEY(pair, b))")
+            self._db.commit()
+        return self._db
+
     def _known(self, pair: str) -> set[int]:
         if pair not in self._have:
-            with self.lock:
-                rows = self.db.execute("SELECT b FROM blocks WHERE pair=?", (pair,)).fetchall()
-            self._have[pair] = {r[0] for r in rows}
+            if not self.path.exists():
+                self._have[pair] = set()
+            else:
+                with self.lock:
+                    rows = self.db.execute("SELECT b FROM blocks WHERE pair=?", (pair,)).fetchall()
+                self._have[pair] = {r[0] for r in rows}
         return self._have[pair]
 
     def _month_file(self, pair: str, t: int) -> Path:
@@ -184,6 +195,8 @@ class S5Cache:
         if a is not None and self._month_file(pair, t1 - 1) == self._month_file(pair, t0):
             i, j = np.searchsorted(a[0], t0), np.searchsorted(a[0], t1)
             return np.column_stack([a[0][i:j], a[1][i:j] / a[2]])
+        if not self.path.exists():
+            return np.empty((0, len(S5_COLS)), dtype=float)
         with self.lock:
             rows = self.db.execute(f"SELECT {','.join(S5_COLS)} FROM s5 WHERE pair=? AND t>=? AND t<? ORDER BY t",
                                    (pair, int(t0), int(t1))).fetchall()
@@ -196,8 +209,6 @@ class S5Cache:
 class DataStore:
     def __init__(self, cache_dir: Path):
         self.cache = cache_dir
-        (self.cache / "tv").mkdir(parents=True, exist_ok=True)
-        (self.cache / "oanda").mkdir(parents=True, exist_ok=True)
         self.s5 = S5Cache(self.cache / "oanda" / "s5_blocks.sqlite")
         self._mem: dict = {}
         self.lock = threading.Lock()
@@ -342,7 +353,9 @@ class DataStore:
             if written >= (b + dt.timedelta(hours=1)).timestamp() or time.time() - written < 15 * 60 or client is None:
                 return
         if client is None:
-            raise RuntimeError("OANDA data missing and no OANDA_TOKEN configured (see Data connections).")
+            if f.exists():
+                return
+            raise RuntimeError(f"OANDA data for {pair} {y:04d}-{m:02d} missing and no OANDA_TOKEN configured (see Data connections).")
         df = client.candles(pair, "M1", a, min(b, now))
         for frame, target in ((resample(df, "5min"), d / f"M5_{name}"), (resample(df, "1h"), d / f"H1_{name}"),
                               (df, f)):   # M1 last: its presence means the month is complete on disk
@@ -357,24 +370,63 @@ class DataStore:
         out = pd.concat(parts)
         return out if out.index.is_monotonic_increasing else out.sort_index()
 
+    def _oanda_packed_slice(self, packed_path: Path, pair: str, lo: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        raw = pd.read_parquet(packed_path)
+        ts = raw.index.to_numpy(np.int64)
+        u_bc_all = raw["bo"].to_numpy(np.int32)
+        u_prev_bc = np.empty_like(u_bc_all)
+        u_prev_bc[0] = u_bc_all[0]
+        u_prev_bc[1:] = u_bc_all[:-1]
+        u_bo_all = u_prev_bc + raw["bh"].to_numpy(np.int32)
+        t0 = int(lo.floor("1h").timestamp())
+        t1 = int(end.ceil("1h").timestamp())
+        i0 = int(np.searchsorted(ts, t0, side="left"))
+        i1 = int(np.searchsorted(ts, t1, side="right"))
+        if i0 >= i1:
+            return pd.DataFrame(columns=MID + BID + ASK, index=pd.DatetimeIndex([], tz="UTC"), dtype=float)
+        sub = raw.iloc[i0:i1]
+        u_bc = u_bc_all[i0:i1]
+        u_bo = u_bo_all[i0:i1]
+        u_bh = np.maximum(u_bo, u_bc) + sub["bl"].to_numpy(np.int32)
+        u_bl = np.minimum(u_bo, u_bc) - sub["bc"].to_numpy(np.int32)
+        u_so = sub["ao"].to_numpy(np.int32)
+        u_ao = u_bo + u_so
+        u_ah = u_bh + u_so + sub["ah"].to_numpy(np.int32)
+        u_al = u_bl + u_so + sub["al"].to_numpy(np.int32)
+        u_ac = u_bc + u_so + sub["ac"].to_numpy(np.int32)
+        u_mo = (u_bo + u_ao + sub["mo"].to_numpy(np.int32)) // 2
+        u_mh = (u_bh + u_ah + sub["mh"].to_numpy(np.int32)) // 2
+        u_ml = (u_bl + u_al + sub["ml"].to_numpy(np.int32)) // 2
+        u_mc = (u_bc + u_ac + sub["mc"].to_numpy(np.int32)) // 2
+        arr = np.column_stack([u_mo, u_mh, u_ml, u_mc, u_bo, u_bh, u_bl, u_bc, u_ao, u_ah, u_al, u_ac])
+        idx = pd.to_datetime(ts[i0:i1], unit="s", utc=True)
+        return pd.DataFrame(arr / _ticks_per_unit(pair), index=idx, columns=MID + BID + ASK)
+
     def _oanda_load(self, pair: str, start: pd.Timestamp, end: pd.Timestamp, force: bool, with_m1: bool = True) -> PairData:
         client = self.oanda_client()
         first = OANDA_FIRST_USABLE.get(pair)
         lo = max(start - pd.Timedelta(days=WARMUP_DAYS), pd.Timestamp(first, tz="UTC")) if first else start - pd.Timedelta(days=WARMUP_DAYS)
-        months = []
-        y, m = lo.year, lo.month
-        while (y, m) <= (end.year, end.month):
-            months.append((y, m))
-            m += 1
-            if m == 13:
-                y, m = y + 1, 1
-        with ThreadPoolExecutor(4) as ex:
-            # OANDA's past candles don't change: "re-download" only needs to redo the latest months
-            list(ex.map(lambda ym: self._oanda_month(client, pair, ym[0], ym[1], force and ym in months[-2:]), months))
         sl = slice(lo, end)
-        m5 = self._oanda_read(pair, "M5", months, MID + BID + ASK).loc[sl]
-        h1 = self._oanda_read(pair, "H1", months, MID + BID + ASK).loc[sl]
-        m1 = self._oanda_read(pair, "M1", months, BID + ASK).loc[sl] if with_m1 else None
+        packed = self.cache / f"{pair}.parquet"
+        if packed.exists() and (not force or client is None):
+            df_m1 = self._oanda_packed_slice(packed, pair, lo, end)
+            m5 = resample(df_m1, "5min").loc[sl] if len(df_m1) else df_m1
+            h1 = resample(df_m1, "1h").loc[sl] if len(df_m1) else df_m1
+            m1 = df_m1[BID + ASK].loc[sl] if with_m1 else None
+        else:
+            months = []
+            y, m = lo.year, lo.month
+            while (y, m) <= (end.year, end.month):
+                months.append((y, m))
+                m += 1
+                if m == 13:
+                    y, m = y + 1, 1
+            with ThreadPoolExecutor(4) as ex:
+                # OANDA's past candles don't change: "re-download" only needs to redo the latest months
+                list(ex.map(lambda ym: self._oanda_month(client, pair, ym[0], ym[1], force and ym in months[-2:]), months))
+            m5 = self._oanda_read(pair, "M5", months, MID + BID + ASK).loc[sl]
+            h1 = self._oanda_read(pair, "H1", months, MID + BID + ASK).loc[sl]
+            m1 = self._oanda_read(pair, "M1", months, BID + ASK).loc[sl] if with_m1 else None
         notes = []
         if len(m5) and m5.index[0] > start:
             notes.append(f"{pair}: OANDA data used here starts {m5.index[0]:%Y-%m-%d}.")
@@ -445,8 +497,16 @@ class DataStore:
                 if f.exists():
                     idx = pd.read_parquet(f, columns=["bc"]).index
                     info[f"fsb_{tf}"] = [str(idx[0]), str(idx[-1]), len(idx)]
+            packed = self.cache / f"{pair}.parquet"
             d = self.cache / "oanda" / pair
-            if d.exists():
+            if packed.exists():
+                idx = pd.read_parquet(packed, columns=[]).index
+                if len(idx):
+                    d0 = dt.datetime.fromtimestamp(int(idx[0]), dt.timezone.utc)
+                    d1 = dt.datetime.fromtimestamp(int(idx[-1]), dt.timezone.utc)
+                    n_months = (d1.year - d0.year) * 12 + (d1.month - d0.month) + 1
+                    info["oanda_months"] = [f"{d0.year:04d}-{d0.month:02d}", f"{d1.year:04d}-{d1.month:02d}", n_months]
+            elif d.exists():
                 files = sorted(d.glob("M1_*.parquet"))
                 if files:
                     info["oanda_months"] = [files[0].stem[3:], files[-1].stem[3:], len(files)]

@@ -31,6 +31,9 @@ ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = ROOT / ".env"
 
 def _resolve_cache_dir() -> Path:
+    bundled = ROOT / "data_cache"
+    if bundled.is_dir() and any(bundled.glob("*.parquet")):
+        return bundled
     # On serverless platforms (Vercel, AWS Lambda), the deployment root is read-only.
     # Fallback to the writable system temp directory.
     if os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME") or os.environ.get("LAMBDA_TASK_ROOT"):
@@ -38,9 +41,8 @@ def _resolve_cache_dir() -> Path:
         d.mkdir(parents=True, exist_ok=True)
         return d
     try:
-        d = ROOT / "data_cache"
-        d.mkdir(parents=True, exist_ok=True)
-        return d
+        bundled.mkdir(parents=True, exist_ok=True)
+        return bundled
     except (OSError, PermissionError):
         d = Path(tempfile.gettempdir()) / "momo_data_cache"
         d.mkdir(parents=True, exist_ok=True)
@@ -107,12 +109,13 @@ def _release_memory() -> None:
     """Hand freed memory back to the system; the C allocator otherwise keeps it for later."""
     gc.collect()
     try:
-        libc = ctypes.CDLL(None)
         if sys.platform == "darwin":
+            libc = ctypes.CDLL(None)
             libc.malloc_zone_pressure_relief(None, 0)
         elif sys.platform.startswith("linux"):
+            libc = ctypes.CDLL(None)
             libc.malloc_trim(0)
-    except (OSError, AttributeError):
+    except (OSError, AttributeError, TypeError):
         pass
 
 
@@ -174,12 +177,14 @@ def index():
 
 @app.get("/api/config")
 def config():
+    cov = store.coverage()
+    has_oanda = bool(os.environ.get("OANDA_TOKEN")) or any("oanda_months" in v for v in cov.values())
     return _clean({
         "defaults": DEFAULTS, "pairs": PAIRS,
-        "sources": {"tradingview": True, "oanda": bool(os.environ.get("OANDA_TOKEN")), "forexsb": True},
+        "sources": {"tradingview": True, "oanda": has_oanda, "forexsb": True},
         "tv_login": bool(os.environ.get("TV_SESSIONID")),
         "oanda_env": os.environ.get("OANDA_ENV", "practice"),
-        "coverage": store.coverage(),
+        "coverage": cov,
     })
 
 
