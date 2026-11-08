@@ -595,7 +595,7 @@ async function loadSingleTradeChart(card) {
   try {
     const c = await api("/api/chart", { params: P, pair: t.pair, center: t.entry_time, start: s, end: e, before, after });
     pxEl.innerHTML = "";
-    const res = plotChart(c, t.pair, t, { px: pxEl, macd: mcEl, legend: legendEl }, { show: new Set(["trade"]), onlyTrade: true, fit: true });
+    const res = plotChart(c, t.pair, t, { px: pxEl, macd: mcEl, legend: legendEl }, { show: new Set(["trade", "news"]), onlyTrade: true, fit: true });
     state.tradeCharts.push(res.px, res.mc);
   } catch (err) {
     pxEl.innerHTML = `<div class="tc-loading hint">Failed to load chart: ${esc(err.message)}</div>`;
@@ -664,7 +664,7 @@ function plotChart(c, pair, trade, el, opt = {}) {
   const newsWin = (state.data ? state.data.params : state.params);
   const nb = (newsWin.news_before_min || 10) * 60, na = (newsWin.news_after_min || 10) * 60;
   bg.setData(c.t.map((t, i) => {
-    const inNews = (c.news || []).some(n => t + 300 > n.t - nb && t <= n.t + na);
+    const inNews = (c.news || []).some(n => t + 300 > n.t - nb && t < n.t + na);
     return { time: t, value: 1, color: inNews ? "rgba(140,140,140,0.28)" : (c.gate && c.gate[i]) ? "rgba(38,166,154,0.07)" : "rgba(0,0,0,0)" };
   }));
 
@@ -695,7 +695,7 @@ function plotChart(c, pair, trade, el, opt = {}) {
   if (show.has("news")) {
     (c.news || []).forEach(n => {
       const t = Math.floor(n.t / 300) * 300;
-      if (t >= c.t[0] && t <= c.t[c.t.length - 1]) marks.push({ time: t, position: "aboveBar", color: "#b0b7c3", shape: "square", text: `N` });
+      if (t >= c.t[0] && t <= c.t[c.t.length - 1]) marks.push({ time: t, position: "aboveBar", color: "#ffb74d", shape: "square", text: "NEWS" });
     });
   }
 
@@ -969,7 +969,7 @@ async function loadDay() {
       box.appendChild(card);
       if (charts[n].error) { $(".chart-px", card).textContent = charts[n].error; return; }
       const r = plotChart(charts[n], pair, null, { px: $(".chart-px", card), macd: $(".chart-macd", card), legend: $(".legend-ov", card) },
-                          { show: new Set(["trade", "hook", "bos", "st"]), trades, fromTo: [from, to] });
+                          { show: new Set(["trade", "hook", "bos", "st", "news"]), trades, fromTo: [from, to] });
       state.dayCharts.push(r.px, r.mc);
     });
   } catch (err) { alert(err.message); } finally { busy(false); }
