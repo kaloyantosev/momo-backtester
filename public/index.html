@@ -207,7 +207,7 @@ footer { text-align: center; padding: 12px 0 4px; }
     $("start").value = iso(start); $("end").value = iso(end);
   }
 
-  fetch("/api/config").then(r => r.json()).then(c => {
+  fetch("/config").then(r => r.json()).then(c => {
     const live = c.sources && c.sources.oanda;
     $("srcText").textContent = live ? `Data: OANDA ${c.oanda_env || ""}`.trim() : "Data: bundled OANDA history";
     if (!live) $("srcDot").style.background = css("--muted");
@@ -237,7 +237,7 @@ footer { text-align: center; padding: 12px 0 4px; }
     $("results").hidden = true;
     status("Running backtest… the first run of a new period downloads its price history and can take up to a minute.");
     try {
-      const r = await fetch("/api/backtest", {
+      const r = await fetch("/backtest", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ params: {}, periods: [{ name: "P1", start: s, end: e }] }),
       });
