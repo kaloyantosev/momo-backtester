@@ -60,7 +60,21 @@ def _load_env():
 
 
 _load_env()
-store = DataStore(CACHE)
+def _download_dir() -> Path:
+    """OANDA API downloads go next to the bundled data, or to temp when the deployment is read-only."""
+    try:
+        (CACHE / "oanda").mkdir(parents=True, exist_ok=True)
+        probe = CACHE / "oanda" / ".write_test"
+        probe.touch()
+        probe.unlink()
+        return CACHE
+    except OSError:
+        d = Path(tempfile.gettempdir()) / "momo_data_cache"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+
+store = DataStore(CACHE, _download_dir())
 app = FastAPI(title="EMA+ST+MACD backtester")
 
 def _find_web_dir() -> Path | None:
@@ -353,6 +367,9 @@ def _chart_window(ctx: dict, pair: str, center_iso: str, before: int, after: int
 
 @app.post("/api/settings")
 def settings(req: SettingsReq):
+    # on the public deployment the keys come from the host's environment variables; visitors must not replace them
+    if os.environ.get("VERCEL"):
+        raise HTTPException(403, "Data connections are set by the site owner on this public site.")
     cur = {}
     if ENV_FILE.exists():
         for line in ENV_FILE.read_text().splitlines():

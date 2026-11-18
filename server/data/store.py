@@ -252,9 +252,12 @@ class S5Cache:
 
 
 class DataStore:
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, download_dir: Path | None = None):
+        """download_dir: where OANDA API downloads are written; a writable place when cache_dir is read-only."""
         self.cache = cache_dir
-        self.s5 = S5Cache(self.cache / "oanda" / "s5_blocks.sqlite")
+        self.dl = download_dir or cache_dir
+        self.s5 = S5Cache(self.dl / "oanda" / "s5_blocks.sqlite")
+        self.s5.packed_path = self.cache / "s5.parquet"
         self._mem: dict = {}
         self.lock = threading.Lock()
 
@@ -385,7 +388,7 @@ class DataStore:
     def _oanda_month(self, client, pair: str, y: int, m: int, force: bool) -> None:
         """Make sure M1 / M5 / H1 files of one month are on disk. M5 and H1 are built from M1; on the whole
         overlap with OANDA's own M5 and H1 candles they are identical (see DATA_QUALITY.md)."""
-        d = self.cache / "oanda" / pair
+        d = self.dl / "oanda" / pair
         d.mkdir(parents=True, exist_ok=True)
         name = f"{y:04d}-{m:02d}.parquet"
         f = d / f"M1_{name}"
@@ -407,7 +410,7 @@ class DataStore:
             write_prices(frame, target, pair)
 
     def _oanda_read(self, pair: str, tf: str, months: list, cols: list[str] | None = None) -> pd.DataFrame:
-        d = self.cache / "oanda" / pair
+        d = self.dl / "oanda" / pair
         parts = [read_prices(d / f"{tf}_{y:04d}-{m:02d}.parquet", pair, cols) for y, m in months]
         parts = [x for x in parts if len(x)]
         if not parts:
@@ -453,7 +456,9 @@ class DataStore:
         lo = max(start - pd.Timedelta(days=WARMUP_DAYS), pd.Timestamp(first, tz="UTC")) if first else start - pd.Timedelta(days=WARMUP_DAYS)
         sl = slice(lo, end)
         packed = self.cache / f"{pair}.parquet"
-        if packed.exists() and (not force or client is None):
+        # with a token, candles come from the OANDA API (cached per month); the bundled file only covers
+        # Dec 2024 - Nov 2026 and is the fallback when no token is set
+        if packed.exists() and client is None:
             df_m1 = self._oanda_packed_slice(packed, pair, lo, end)
             m5 = resample(df_m1, "5min").loc[sl] if len(df_m1) else df_m1
             h1 = resample(df_m1, "1h").loc[sl] if len(df_m1) else df_m1
@@ -543,7 +548,7 @@ class DataStore:
                     idx = pd.read_parquet(f, columns=["bc"]).index
                     info[f"fsb_{tf}"] = [str(idx[0]), str(idx[-1]), len(idx)]
             packed = self.cache / f"{pair}.parquet"
-            d = self.cache / "oanda" / pair
+            d = self.dl / "oanda" / pair
             if packed.exists():
                 idx = pd.read_parquet(packed, columns=[]).index
                 if len(idx):
