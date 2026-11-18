@@ -179,13 +179,20 @@ class SettingsReq(BaseModel):
     tv_sessionid_sign: str | None = None
 
 
+def _page(name: str):
+    if WEB_DIR is not None and (WEB_DIR / name).is_file():
+        return FileResponse(WEB_DIR / name)
+    return HTMLResponse("<h1>MOMO Backtester</h1><p>Server is running.</p>")
+
+
 @app.get("/")
 def index():
-    if WEB_DIR is not None:
-        idx = WEB_DIR / "index.html"
-        if idx.is_file():
-            return FileResponse(idx)
-    return HTMLResponse("<h1>MOMO Backtester</h1><p>Server is running.</p>")
+    return _page("home.html")
+
+
+@app.get("/dashboard")
+def dashboard():
+    return _page("index.html")
 
 
 
